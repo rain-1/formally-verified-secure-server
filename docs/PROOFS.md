@@ -13,7 +13,8 @@ Everything below is machine-checked by `make verify` (F* + Z3) unless marked *te
 | Memory safety / no integer overflow / no out-of-bounds for parser, normalizer, lookup, header builder | **proved** (Low*) |
 | Parser: accepted request => target lies inside the header block, `consumed <= input length` | **proved** |
 | Header grammar details (smuggling defences: CL/TE/duplicate Host/obs-fold/bare-LF/NUL) | **tested** (`test/raw.py`), not formally specified |
-| `Http.Server.handle`: end-to-end statement "body served == content of the entry whose key == key_of(target)" | **not proved**. The two halves (normalize, lookup) are proved separately; `handle` composes them and is proved memory-safe with in-bounds body slice, but the composition lemma is not written. |
+| `Http.Core.lookup` is also **complete**: "not found" means no in-bounds entry has the key | **proved** |
+| `Http.Server.handle` routing theorem (`routed`): if it serves a body (`res[8]=1`) the body slice is the site entry whose key equals `key_of(path_of(target))` (target = the bytes the parser identified); if it answers 404 for a parsed request (`res[8]=2`) then either the path is rejected by the spec or no in-bounds entry has that key | **proved** |
 | Response bytes (headers, Content-Type table) are what we intend | **tested** |
 
 ## TLS 1.3 (`src/Tls.*.fst`)

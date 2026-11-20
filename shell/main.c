@@ -74,7 +74,7 @@ static void tls_do_write(conn_t *c);
 
 /* try to run the verified handler on whatever is buffered */
 static void process(conn_t *c) {
-  uint32_t res[8] = {0};
+  uint32_t res[10] = {0};
   Http_Server_handle(c->in, c->inlen, site.ent, site.count, site.blob, (uint32_t)site.blen, c->hdr, res);
   if (res[0] == 0) {
     if (c->inlen >= REQ_MAX) conn_close(c);

@@ -114,7 +114,14 @@ val lookup : ent:B.buffer U32.t -> count:U32.t{B.length ent = 4 * U32.v count}
            S.equal (S.slice (B.as_seq h0 blob)
                       (U32.v (B.get h0 ent (4 * U32.v r)))
                       (U32.v (B.get h0 ent (4 * U32.v r)) + U32.v (B.get h0 ent (4 * U32.v r + 1))))
-                   (B.as_seq h0 key)))
+                   (B.as_seq h0 key)) /\
+        (* completeness: "not found" means no remaining in-bounds entry has this key *)
+        (U32.v r = U32.v count ==>
+           (forall (j:nat). U32.v i <= j /\ j < U32.v count /\ entry_in_bounds h0 ent blen j ==>
+              ~ (S.equal (S.slice (B.as_seq h0 blob)
+                           (U32.v (B.get h0 ent (4 * j)))
+                           (U32.v (B.get h0 ent (4 * j)) + U32.v (B.get h0 ent (4 * j + 1))))
+                         (B.as_seq h0 key)))))
      (decreases (U32.v count - U32.v i))
 let rec lookup ent count blob blen key klen i =
   if i = count then count

@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
     const char *sd = seeds[rnd() % 4]; size_t n = strlen(sd); memcpy(req, sd, n);
     if (rnd() % 8 == 0) { n = rnd() % 8192; for (size_t j = 0; j < n; j++) req[j] = (uint8_t)rnd(); }
     else mutate(req, &n, sizeof req);
-    uint32_t res[8] = {0};
+    uint32_t res[10] = {0};
     Http_Server_handle(req, (uint32_t)n, ent, 2, blob, sizeof blob, out, res);
     if (res[0] == 1) {
       if (res[1] > n || res[2] > 512 || (uint64_t)res[3] + res[4] > sizeof blob) { fprintf(stderr, "HTTP invariant violated\n"); return 1; }
