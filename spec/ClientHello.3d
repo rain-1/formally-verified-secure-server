@@ -1,0 +1,25 @@
+/* TLS 1.3 ClientHello body (RFC 8446 section 4.1.2), as EverParse 3D.
+   EverParse compiles this to a C validator that is verified (memory-safe, and accepts exactly this grammar).
+   The validator returns the end position; the caller requires it to equal the body length (exact consumption). */
+
+typedef struct _Extension
+{
+  UINT16BE ext_type;
+  UINT16BE ext_len;
+  UINT8    ext_data[:byte-size ext_len];
+} Extension;
+
+entrypoint
+typedef struct _ClientHelloBody
+{
+  UINT16BE legacy_version;
+  UINT8    random[32];
+  UINT8    session_id_len { session_id_len <= 32 };
+  UINT8    session_id[:byte-size session_id_len];
+  UINT16BE cipher_suites_len { cipher_suites_len >= 2 && cipher_suites_len % 2 == 0 };
+  UINT8    cipher_suites[:byte-size cipher_suites_len];
+  UINT8    compression_len { compression_len >= 1 };
+  UINT8    compression[:byte-size compression_len];
+  UINT16BE extensions_len ;
+  Extension extensions[:byte-size extensions_len];
+} ClientHelloBody;

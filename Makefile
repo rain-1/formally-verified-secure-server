@@ -10,7 +10,7 @@ FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fst
 # dependency order
 MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
-        Tls.Util Tls.Crypto Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
+        Tls.Util Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 CC ?= gcc
 OUT ?= _build/server
 HARDEN := -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fPIE
@@ -36,7 +36,7 @@ c:
 	$(KRML) -fstar tools/fstar-krml.sh -I src -tmpdir _build/c \
 	  -bundle 'Http.Server=Http.Server,Http.Parse,Http.Core,Http.Spec' \
 	  -bundle 'Tls.Conn=Tls.Conn,Tls.Server,Tls.Flight,Tls.Kdf,Tls.State,Tls.Crypto,Tls.Hello,Tls.Util' \
-	  -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
+	  -bundle Tls.ChValid -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
 	  -bundle Hacl.AEAD_Chacha20Poly1305 -bundle Hacl.P256 -bundle EverCrypt.AEAD -skip-compilation -warn-error -1..27 \
 	  $(addprefix src/,$(addsuffix .fst,$(MODS))) > _build/krml.log 2>&1; test -f _build/c/Tls_Conn.c
 	@# warnings are fatal only for OUR code (ghost HACL* spec modules trigger benign ones before being dropped)
@@ -46,8 +46,8 @@ c:
 	@for h in Hacl_P256 Hacl_Hash_SHA2 Hacl_HMAC Hacl_HKDF Hacl_Curve25519_51 Hacl_AEAD_Chacha20Poly1305; do echo "#include <$$h.h>" > _build/c/internal/$$h.h; done
 
 server: c
-	$(CC) $(CFLAGS) -I_build/c -Icsrc/hacl -Icsrc/krml -Ishell -o $(OUT) \
-	  shell/main.c shell/site.c shell/sandbox.c _build/c/Http_Server.c _build/c/Tls_Conn.c $(HACL_SRC) $(LDFLAGS)
+	$(CC) $(CFLAGS) -I_build/c -Icsrc/hacl -Icsrc/krml -Icsrc/everparse -Ishell -o $(OUT) \
+	  shell/main.c shell/site.c shell/sandbox.c _build/c/Http_Server.c _build/c/Tls_Conn.c csrc/everparse/ClientHello.c csrc/everparse/ch_check.c $(HACL_SRC) $(LDFLAGS)
 
 # fully static PIE (no dynamic loader/libc search, smaller attack surface); recommended for deployment
 server-static:
@@ -63,8 +63,8 @@ test-matrix:
 
 # in-process fuzzing of the extracted entry points under ASan+UBSan
 fuzz: c
-	$(CC) -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wno-parentheses -I_build/c -Icsrc/hacl -Icsrc/krml \
-	  -o _build/fuzz test/fuzz_inproc.c _build/c/Http_Server.c _build/c/Tls_Conn.c $(HACL_SRC) -fsanitize=address,undefined
+	$(CC) -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wno-parentheses -I_build/c -Icsrc/hacl -Icsrc/krml -Icsrc/everparse \
+	  -o _build/fuzz test/fuzz_inproc.c _build/c/Http_Server.c _build/c/Tls_Conn.c csrc/everparse/ClientHello.c csrc/everparse/ch_check.c $(HACL_SRC) -fsanitize=address,undefined
 	ASAN_OPTIONS=detect_leaks=0 _build/fuzz $(or $(ITERS),400000)
 
 clean:

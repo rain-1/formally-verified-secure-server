@@ -143,7 +143,9 @@ let parse b bl pr =
   B.upd pr 1ul z; B.upd pr 2ul z; B.upd pr 3ul z; B.upd pr 4ul z; B.upd pr 5ul z;
   B.upd pr 6ul z; B.upd pr 7ul z; B.upd pr 8ul z; B.upd pr 9ul z; B.upd pr 10ul z;
   (* legacy_version(2) random(32) session_id_len(1) *)
-  if U32.lt bl 35ul then B.upd pr 0ul 0ul
+  let grammar_ok = Tls.ChValid.check b bl in
+  if not grammar_ok then B.upd pr 0ul 0ul
+  else if U32.lt bl 35ul then B.upd pr 0ul 0ul
   else begin
     let sl_raw = B.index b 34ul in let sl = FStar.Int.Cast.uint8_to_uint32 sl_raw in
     if U32.gt sl 32ul || U32.gt (U32.add 35ul sl) bl then B.upd pr 0ul 0ul
