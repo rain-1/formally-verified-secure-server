@@ -6,9 +6,9 @@ E := $(CURDIR)/.toolchain/everparse/everparse
 FSTAR := $(E)/bin/fstar.exe
 KRML := $(E)/bin/krml
 CACHE := _build/cache
-FSTFLAGS := --include $(E)/lib/krml --include src --cache_checked_modules --cache_dir $(CACHE)
+FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fstar/specs --include third_party/hacl-fstar/lib --cache_checked_modules --cache_dir $(CACHE)
 # dependency order
-MODS := Http.Spec Http.Core Http.Parse Http.Server \
+MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
         Tls.Util Tls.Crypto Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 CC ?= gcc

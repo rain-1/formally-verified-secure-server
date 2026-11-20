@@ -1,0 +1,1 @@
+F* specs and libraries copied from https://github.com/hacl-star/hacl-star (commit f557259007db9933442dde10aa995c1b00bd3446), unmodified. Verified upstream; re-checked by 'make verify'.

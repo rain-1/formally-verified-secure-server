@@ -10,7 +10,7 @@ A proof is a statement about a model. These are the things the guarantees depend
 
 **Crypto**
 - HACL* / EverCrypt / Vale as vendored in `csrc/hacl` (published proofs, not re-checked here).
-- The assumed contracts in `src/Hacl.*.fst` / `src/EverCrypt.AEAD.fst` (memory-level only).
+- The assumed contracts in `src/Hacl.*.fst` / `src/EverCrypt.AEAD.fst`: functional for SHA-256/HMAC/HKDF (C == HACL* F* spec), memory-level for the rest.
 - Constant-time: HACL* primitives are secret-independent in source and Vale code is verified for it. Our own code branches
   only on public data (lengths, message types). Compiler-introduced timing variation and microarchitectural attacks are out of scope.
 

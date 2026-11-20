@@ -11,6 +11,8 @@ open FStar.Mul
 open Tls.Util
 open Tls.Crypto
 open Tls.State
+module S = FStar.Seq
+module Spec = Tls.Spec
 
 #set-options "--z3rlimit 300 --fuel 1 --ifuel 1"
 
@@ -35,7 +37,8 @@ let install_keys st ko vo so secret =
 val derived : out:ibuf{B.length out = 32} -> secret:ibuf{B.length secret = 32}
   -> Stack unit
      (requires fun h -> B.live h out /\ B.live h secret /\ B.disjoint out secret)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1 /\
+        B.as_seq h1 out == Spec.derive_secret (B.as_seq h0 secret) (Spec.lit_bytes "derived") Spec.empty_hash)
 let derived out secret =
   push_frame ();
   let e1 = B.alloca 0uy 1ul in
@@ -50,7 +53,8 @@ let derived out secret =
 val hs_secret : hs:ibuf{B.length hs = 32} -> shared:ibuf{B.length shared = 32}
   -> Stack unit
      (requires fun h -> B.live h hs /\ B.live h shared /\ B.disjoint hs shared)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer hs) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer hs) h0 h1 /\
+        B.as_seq h1 hs == Spec.handshake_secret (B.as_seq h0 shared))
 let hs_secret hs shared =
   push_frame ();
   let z32 = B.alloca 0uy 32ul in
@@ -65,7 +69,8 @@ let hs_secret hs shared =
 val master_secret : ms:ibuf{B.length ms = 32} -> hs:ibuf{B.length hs = 32}
   -> Stack unit
      (requires fun h -> B.live h ms /\ B.live h hs /\ B.disjoint ms hs)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer ms) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer ms) h0 h1 /\
+        B.as_seq h1 ms == Spec.master_secret (B.as_seq h0 hs))
 let master_secret ms hs =
   push_frame ();
   let z32 = B.alloca 0uy 32ul in

@@ -21,17 +21,19 @@ Everything below is machine-checked by `make verify` (F* + Z3) unless marked *te
 
 | Property | Status |
 |---|---|
+| Key-schedule building blocks equal the RFC 8446 spec (`src/Tls.Spec.fst`, built on HACL*'s verified `Spec.Agile.Hash/HMAC/HKDF`, vendored in `third_party/hacl-fstar`): `expand_label` (the `HkdfLabel` byte string + HKDF-Expand), `derive_secret`, `traffic_keys` (AEAD key + IV), `derived`, `hs_secret` (handshake secret), `master_secret` | **proved** (relative to the assumption below) |
 | Memory safety, no overflow, buffer-disjointness discipline in every function (hello parser, key schedule, flight builder, record layer, state machine) | **proved** (Low*) |
 | Bounds-checked ClientHello parser cannot read outside the record | **proved** |
-| Key schedule / transcript / Finished / CertificateVerify / record protection match RFC 8446 | **tested** by interoperability (OpenSSL 3.5, curl, Python ssl; both suites; 300 KB transfers; mutated-input fuzzing under ASan/UBSan). **Not proved.** |
+| Remaining TLS pieces (transcript hashing/updates, traffic-secret derivation from the live transcript, Finished, CertificateVerify content, nonce construction, record framing, handshake message layouts, state machine) match RFC 8446 | **tested** by interoperability (OpenSSL 3.5, curl, Python ssl; both suites; 300 KB transfers; mutated-input fuzzing under ASan/UBSan). **Not proved.** |
 | Cryptographic security of the protocol | **not claimed**. We rely on HACL*'s verified primitives and on RFC 8446's design; the composition here is unproved. |
 
 ## Assumed (trusted) interfaces
 
-`src/Hacl.*.fst` and `src/EverCrypt.AEAD.fst` declare the contracts of the HACL*/EverCrypt C functions we call
-(`assume val`). These state only memory-level facts (liveness, lengths, disjointness, what is modified). We do **not**
-re-derive functional crypto correctness here; that rests on upstream HACL* (verified in F*/Vale) as vendored in `csrc/hacl`
-(commit `f557259007db9933442dde10aa995c1b00bd3446`).
+`src/Hacl.*.fst` and `src/EverCrypt.AEAD.fst` declare the contracts of the HACL*/EverCrypt C functions we call (`assume val`).
+For SHA-256, HMAC-SHA-256, HKDF-Extract and HKDF-Expand the contract is functional: *the C function computes HACL*'s own verified F* spec*
+(`Spec.Agile.*`) — exactly the theorem HACL* proves of its code, which we take on trust. For the other primitives (x25519, ECDSA P-256,
+ChaCha20-Poly1305, AES-128-GCM) the contracts are memory-level only; no functional spec link yet.
+Vendored C: `csrc/hacl` (commit `f557259007db9933442dde10aa995c1b00bd3446`); vendored F* specs: `third_party/hacl-fstar` (same commit, unmodified).
 
 ## Not verified at all
 

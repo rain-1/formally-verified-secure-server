@@ -8,10 +8,48 @@ module U32 = FStar.UInt32
 module U8 = FStar.UInt8
 module HS = FStar.HyperStack
 open Tls.Util
+module S = FStar.Seq
+module Spec = Tls.Spec
 
 #set-options "--z3rlimit 300 --fuel 1 --ifuel 1"
 
-(* HKDF-Expand-Label(secret, label, context, len), RFC 8446 section 7.1 *)
+let extend (s:Spec.bytes) (p k:nat) (acc piece:Spec.bytes)
+  : Lemma (requires p + k <= S.length s /\ S.slice s 0 p == acc /\ S.slice s p (p + k) == piece)
+          (ensures S.slice s 0 (p + k) == S.append acc piece)
+  = S.lemma_eq_intro (S.slice s 0 (p + k)) (S.append acc piece)
+
+let assoc5 (a b c d e f:Spec.bytes)
+  : Lemma (S.append (S.append (S.append (S.append (S.append a b) c) d) e) f ==
+           S.append a (S.append b (S.append c (S.append d (S.append e f)))))
+  = S.append_assoc (S.append (S.append (S.append a b) c) d) e f;
+    S.append_assoc (S.append (S.append a b) c) d (S.append e f);
+    S.append_assoc (S.append a b) c (S.append d (S.append e f));
+    S.append_assoc a b (S.append c (S.append d (S.append e f)))
+
+(* the incremental writes spell out exactly the specified HkdfLabel *)
+let glue (s1 s2 s3 s4 s5 s6 lab cx:Spec.bytes) (len ll cl:nat)
+  : Lemma (requires len <= 8160 /\ ll <= 16 /\ cl <= 32 /\ S.length lab = ll /\ S.length cx = cl /\
+                    S.length s1 >= 128 /\ S.length s2 >= 128 /\ S.length s3 >= 128 /\ S.length s4 >= 128 /\
+                    S.length s5 >= 128 /\ S.length s6 >= 128 /\
+                    S.slice s1 0 2 == Spec.u16_be len /\
+                    S.slice s2 0 2 == S.slice s1 0 2 /\ S.slice s2 2 3 == S.create 1 (U8.uint_to_t (6 + ll)) /\
+                    S.slice s3 0 3 == S.slice s2 0 3 /\ S.slice s3 3 9 == Spec.tls13_prefix /\
+                    S.slice s4 0 9 == S.slice s3 0 9 /\ S.slice s4 9 (9 + ll) == lab /\
+                    S.slice s5 0 (9 + ll) == S.slice s4 0 (9 + ll) /\ S.slice s5 (9 + ll) (10 + ll) == S.create 1 (U8.uint_to_t cl) /\
+                    S.slice s6 0 (10 + ll) == S.slice s5 0 (10 + ll) /\ S.slice s6 (10 + ll) (10 + ll + cl) == cx)
+          (ensures S.slice s6 0 (10 + ll + cl) == Spec.hkdf_label len lab cx)
+  = let u = Spec.u16_be len in
+    let bl = S.create 1 (U8.uint_to_t (6 + ll)) in
+    let c1 = S.create 1 (U8.uint_to_t cl) in
+    extend s2 2 1 u bl;
+    extend s3 3 6 (S.append u bl) Spec.tls13_prefix;
+    extend s4 9 ll (S.append (S.append u bl) Spec.tls13_prefix) lab;
+    extend s5 (9 + ll) 1 (S.append (S.append (S.append u bl) Spec.tls13_prefix) lab) c1;
+    extend s6 (10 + ll) cl (S.append (S.append (S.append (S.append u bl) Spec.tls13_prefix) lab) c1) cx;
+    assoc5 u bl Spec.tls13_prefix lab c1 cx
+
+(* HKDF-Expand-Label(secret, label, context, len), RFC 8446 section 7.1.
+   PROVED: the output equals Tls.Spec.expand_label (given the assumed HKDF-Expand contract). *)
 val expand_label : out:ibuf -> len:U32.t{U32.v len = B.length out /\ U32.v len >= 1 /\ U32.v len <= 64}
   -> secret:ibuf{B.length secret = 32}
   -> label:lbuf -> ll:U32.t{U32.v ll = B.length label /\ U32.v ll <= 16}
@@ -19,18 +57,28 @@ val expand_label : out:ibuf -> len:U32.t{U32.v len = B.length out /\ U32.v len >
   -> Stack unit
      (requires fun h -> B.live h out /\ B.live h secret /\ B.live h label /\ B.live h ctx /\
         B.disjoint out secret /\ B.disjoint out ctx)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1 /\
+        B.as_seq h1 out == Spec.expand_label (B.as_seq h0 secret) (U32.v len) (B.as_seq h0 label) (B.as_seq h0 ctx))
 let expand_label out len secret label ll ctx cl =
   push_frame ();
+  let hA = get () in
   let info = B.alloca 0uy 128ul in
   let p = put_u16 info 0ul len in
+  let h1 = get () in
   let p = put_u8 info p (FStar.Int.Cast.uint32_to_uint8 (U32.add 6ul ll)) in
+  let h2 = get () in
   let l6, n6 = LowStar.Literal.buf_len_of_literal "tls13 " in
-  let p = put_lit info p l6 n6 0ul in
-  let p = put_lit info p label ll 0ul in
+  let p = put_lit_c info p l6 n6 in
+  let h3 = get () in
+  let p = put_lit_c info p label ll in
+  let h4 = get () in
   let p = put_u8 info p (FStar.Int.Cast.uint32_to_uint8 cl) in
+  let h5 = get () in
   let p = put_buf info p ctx cl in
+  let h6 = get () in
   let inf = B.sub info 0ul p in
+  glue (B.as_seq h1 info) (B.as_seq h2 info) (B.as_seq h3 info) (B.as_seq h4 info) (B.as_seq h5 info) (B.as_seq h6 info)
+       (B.as_seq hA label) (B.as_seq hA ctx) (U32.v len) (U32.v ll) (U32.v cl);
   Hacl.HKDF.expand_sha2_256 out secret 32ul inf p len;
   pop_frame ()
 
@@ -40,7 +88,8 @@ val derive_secret : out:ibuf{B.length out = 32} -> secret:ibuf{B.length secret =
   -> Stack unit
      (requires fun h -> B.live h out /\ B.live h secret /\ B.live h label /\ B.live h th /\
         B.disjoint out secret /\ B.disjoint out th)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1 /\
+        B.as_seq h1 out == Spec.derive_secret (B.as_seq h0 secret) (B.as_seq h0 label) (B.as_seq h0 th))
 let derive_secret out secret label ll th = expand_label out 32ul secret label ll th 32ul
 
 (* AEAD key/iv from a traffic secret *)
@@ -49,7 +98,10 @@ val traffic_keys : key:ibuf{B.length key = 32} -> iv:ibuf{B.length iv = 12} -> s
   -> Stack unit
      (requires fun h -> B.live h key /\ B.live h iv /\ B.live h secret /\
         B.disjoint key iv /\ B.disjoint key secret /\ B.disjoint iv secret)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_buffer key) (B.loc_buffer iv)) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_buffer key) (B.loc_buffer iv)) h0 h1 /\
+        (let kl = if U8.v suite = 1 then 16 else 32 in
+         S.slice (B.as_seq h1 key) 0 kl == Spec.traffic_key (B.as_seq h0 secret) kl /\
+         B.as_seq h1 iv == Spec.traffic_iv (B.as_seq h0 secret)))
 let traffic_keys key iv secret suite =
   push_frame ();
   let e1 = B.alloca 0uy 1ul in
