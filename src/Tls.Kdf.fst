@@ -83,7 +83,11 @@ let master_secret ms hs =
 val traffic_secrets : st:stb -> tr:trb -> hs:ibuf{B.length hs = 32}
   -> Stack unit
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h hs /\ B.disjoint st tr /\ B.disjoint st hs /\ B.disjoint tr hs)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
+        S.slice (B.as_seq h1 st) (U32.v o_chs) (U32.v o_chs + 32) ==
+          Spec.derive_secret (B.as_seq h0 hs) (Spec.lit_bytes "c hs traffic") (Spec.sha256 (transcript h0 st tr)) /\
+        S.slice (B.as_seq h1 st) (U32.v o_shs) (U32.v o_shs + 32) ==
+          Spec.derive_secret (B.as_seq h0 hs) (Spec.lit_bytes "s hs traffic") (Spec.sha256 (transcript h0 st tr)))
 let traffic_secrets st tr hs =
   push_frame ();
   let th1 = B.alloca 0uy 32ul in
@@ -94,25 +98,37 @@ let traffic_secrets st tr hs =
   derive_secret chs hs lc nc th1;
   let ls, ns = LowStar.Literal.buf_len_of_literal "s hs traffic" in
   derive_secret shs hs ls ns th1;
-  save32 st o_chs chs;
-  save32 st o_shs shs;
   install_keys st o_skey o_siv o_sseq shs;
   install_keys st o_ckey o_civ o_cseq chs;
+  save32 st o_chs chs;
+  let ha = get () in
+  save32 st o_shs shs;
+  let hb = get () in
+  assert (S.equal (S.slice (B.as_seq hb st) 8 40) (S.slice (B.as_seq ha st) 8 40));
   pop_frame ()
 
 (* after ClientHello+ServerHello are in the transcript *)
 val key_sched : st:stb -> tr:trb -> shared:ibuf{B.length shared = 32}
   -> Stack unit
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h shared /\ B.disjoint st tr /\ B.disjoint st shared /\ B.disjoint tr shared)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
+        (let hs = Spec.handshake_secret (B.as_seq h0 shared) in
+         let th = Spec.sha256 (transcript h0 st tr) in
+         S.slice (B.as_seq h1 st) (U32.v o_chs) (U32.v o_chs + 32) == Spec.derive_secret hs (Spec.lit_bytes "c hs traffic") th /\
+         S.slice (B.as_seq h1 st) (U32.v o_shs) (U32.v o_shs + 32) == Spec.derive_secret hs (Spec.lit_bytes "s hs traffic") th /\
+         S.slice (B.as_seq h1 st) (U32.v o_ms) (U32.v o_ms + 32) == Spec.master_secret hs))
 let key_sched st tr shared =
   push_frame ();
   let hs = B.alloca 0uy 32ul in
   let ms = B.alloca 0uy 32ul in
   hs_secret hs shared;
   traffic_secrets st tr hs;
+  let ha = get () in
   master_secret ms hs;
   save32 st o_ms ms;
+  let hb = get () in
+  assert (S.equal (S.slice (B.as_seq hb st) 8 40) (S.slice (B.as_seq ha st) 8 40));
+  assert (S.equal (S.slice (B.as_seq hb st) 40 72) (S.slice (B.as_seq ha st) 40 72));
   pop_frame ()
 
 (* application traffic secrets from st.ms and st.th (CH..server Finished) *)

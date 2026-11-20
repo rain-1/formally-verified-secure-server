@@ -33,12 +33,14 @@ verify:
 
 c:
 	rm -rf _build/c && mkdir -p _build/c
-	$(KRML) -fstar $(FSTAR) -I src -tmpdir _build/c \
+	$(KRML) -fstar tools/fstar-krml.sh -I src -tmpdir _build/c \
 	  -bundle 'Http.Server=Http.Server,Http.Parse,Http.Core,Http.Spec' \
 	  -bundle 'Tls.Conn=Tls.Conn,Tls.Server,Tls.Flight,Tls.Kdf,Tls.State,Tls.Crypto,Tls.Hello,Tls.Util' \
 	  -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
-	  -bundle Hacl.AEAD_Chacha20Poly1305 -bundle Hacl.P256 -bundle EverCrypt.AEAD -skip-compilation -warn-error @1..27 \
-	  $(addprefix src/,$(addsuffix .fst,$(MODS))) >/dev/null 2>&1; test -f _build/c/Tls_Conn.c
+	  -bundle Hacl.AEAD_Chacha20Poly1305 -bundle Hacl.P256 -bundle EverCrypt.AEAD -skip-compilation -warn-error -1..27 \
+	  $(addprefix src/,$(addsuffix .fst,$(MODS))) > _build/krml.log 2>&1; test -f _build/c/Tls_Conn.c
+	@# warnings are fatal only for OUR code (ghost HACL* spec modules trigger benign ones before being dropped)
+	@! grep -E '^Warning [0-9]+: .*(Tls\.(Util|Crypto|Hello|State|Kdf|Flight|Server|Conn)|Http\.(Core|Parse|Server)|Hacl\.(Hash|HMAC|HKDF|Curve|AEAD|P256)|EverCrypt)' _build/krml.log
 	@# HACL* is linked from the vendored upstream C: replace krml's generated stub headers with forwarders
 	rm -f _build/c/internal/Hacl_*.h; mkdir -p _build/c/internal
 	@for h in Hacl_P256 Hacl_Hash_SHA2 Hacl_HMAC Hacl_HKDF Hacl_Curve25519_51 Hacl_AEAD_Chacha20Poly1305; do echo "#include <$$h.h>" > _build/c/internal/$$h.h; done

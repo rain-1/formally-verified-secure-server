@@ -11,6 +11,8 @@ open FStar.Mul
 open Tls.Util
 open Tls.Crypto
 module H = Tls.Hello
+module S = FStar.Seq
+module Spec = Tls.Spec
 
 #set-options "--z3rlimit 400 --fuel 1 --ifuel 1"
 
@@ -35,10 +37,14 @@ inline_for_extraction let o_aesok : U32.t = 246ul   (* 1 if the CPU supports the
 
 (* phases: 0 wait ClientHello, 1 wait client Finished, 2 connected, 3 closed *)
 
-val get_trlen : st:stb -> Stack U32.t (requires fun h -> B.live h st) (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536)
+val get_trlen : st:stb -> Stack U32.t (requires fun h -> B.live h st)
+  (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536 /\
+     U32.v r = U8.v (S.index (B.as_seq h0 st) 240) + 256 * U8.v (S.index (B.as_seq h0 st) 241))
 let get_trlen st =
   let a = B.index st 240ul in
   let b = B.index st 241ul in
+  assert_norm (pow2 8 = 256);
+  assert_norm (pow2 32 = 4294967296);
   U32.add (FStar.Int.Cast.uint8_to_uint32 a) (U32.shift_left (FStar.Int.Cast.uint8_to_uint32 b) 8ul)
 
 val set_trlen : st:stb -> v:U32.t{U32.v v < 65536} -> Stack unit (requires fun h -> B.live h st)
@@ -63,10 +69,19 @@ let tr_add st tr msg mlen =
     true
   end
 
+(* ghost view: the transcript bytes currently held (length clamped exactly as tr_hash clamps it) *)
+let trlen_g (s:S.seq U8.t{S.length s = 512}) : GTot (n:nat{n <= 20480}) =
+  let n = U8.v (S.index s 240) + 256 * U8.v (S.index s 241) in
+  if n > 20480 then 0 else n
+
+let transcript (hst:HS.mem) (st:stb) (tr:trb) : GTot Spec.bytes =
+  S.slice (B.as_seq hst tr) 0 (trlen_g (B.as_seq hst st))
+
 val tr_hash : st:stb -> tr:trb -> out:ibuf{B.length out = 32}
   -> Stack unit
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h out /\ B.disjoint out tr /\ B.disjoint out st)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1 /\
+        B.as_seq h1 out == Spec.sha256 (transcript h0 st tr))
 let tr_hash st tr out =
   let n0 = get_trlen st in
   let n : (n:U32.t{U32.v n <= 20480}) = if U32.gt n0 20480ul then 0ul else n0 in
@@ -158,7 +173,18 @@ let fail_with ad code = B.upd ad 0ul code; 0ul
 
 val save32 : st:stb -> off:U32.t{U32.v off + 32 <= 512} -> src:ibuf{B.length src = 32}
   -> Stack unit (requires fun h -> B.live h st /\ B.live h src /\ B.disjoint st src)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
-let save32 st off src = B.blit src 0ul st off 32ul
-
-
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
+        S.slice (B.as_seq h1 st) (U32.v off) (U32.v off + 32) == B.as_seq h0 src /\
+        (forall (i:nat). i < 512 /\ (i < U32.v off \/ i >= U32.v off + 32) ==> S.index (B.as_seq h1 st) i == S.index (B.as_seq h0 st) i))
+#push-options "--fuel 2 --z3rlimit 400"
+let save32 st off src =
+  let h0 = get () in
+  B.blit src 0ul st off 32ul;
+  let h1 = get () in
+  let o = U32.v off in
+  let s0 = B.as_seq h0 st in
+  let s1 = B.as_seq h1 st in
+  assert (S.equal (S.slice (B.as_seq h0 src) 0 32) (B.as_seq h0 src));
+  assert (S.equal s1 (S.append (S.slice s1 0 o) (S.append (S.slice s1 o (o + 32)) (S.slice s1 (o + 32) 512))));
+  assert (S.equal s1 (S.append (S.slice s0 0 o) (S.append (B.as_seq h0 src) (S.slice s0 (o + 32) 512))))
+#pop-options

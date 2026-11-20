@@ -22,9 +22,10 @@ Everything below is machine-checked by `make verify` (F* + Z3) unless marked *te
 | Property | Status |
 |---|---|
 | Key-schedule building blocks equal the RFC 8446 spec (`src/Tls.Spec.fst`, built on HACL*'s verified `Spec.Agile.Hash/HMAC/HKDF`, vendored in `third_party/hacl-fstar`): `expand_label` (the `HkdfLabel` byte string + HKDF-Expand), `derive_secret`, `traffic_keys` (AEAD key + IV), `derived`, `hs_secret` (handshake secret), `master_secret` | **proved** (relative to the assumption below) |
+| `Tls.Kdf.key_sched` (handshake secret -> client/server handshake traffic secrets over the live transcript -> master secret): the bytes stored in the connection state equal `derive_secret(handshake_secret(shared), "c hs traffic"/"s hs traffic", SHA-256(transcript))` and `master_secret(handshake_secret(shared))`; `tr_hash` is proved to hash exactly the transcript prefix held in the state | **proved** (relative to the assumption below) |
 | Memory safety, no overflow, buffer-disjointness discipline in every function (hello parser, key schedule, flight builder, record layer, state machine) | **proved** (Low*) |
 | Bounds-checked ClientHello parser cannot read outside the record | **proved** |
-| Remaining TLS pieces (transcript hashing/updates, traffic-secret derivation from the live transcript, Finished, CertificateVerify content, nonce construction, record framing, handshake message layouts, state machine) match RFC 8446 | **tested** by interoperability (OpenSSL 3.5, curl, Python ssl; both suites; 300 KB transfers; mutated-input fuzzing under ASan/UBSan). **Not proved.** |
+| Remaining TLS pieces (transcript *appends* (`tr_add` contents), application-traffic-secret and Finished derivation from the stored hash, Finished, CertificateVerify content, nonce construction, record framing, handshake message layouts, state machine) match RFC 8446 | **tested** by interoperability (OpenSSL 3.5, curl, Python ssl; both suites; 300 KB transfers; mutated-input fuzzing under ASan/UBSan). **Not proved.** |
 | Cryptographic security of the protocol | **not claimed**. We rely on HACL*'s verified primitives and on RFC 8446's design; the composition here is unproved. |
 
 ## Assumed (trusted) interfaces
