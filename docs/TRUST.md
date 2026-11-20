@@ -18,7 +18,7 @@ A proof is a statement about a model. These are the things the guarantees depend
 - `src/Http.Spec.fst` and docs/POLICY.md. A wrong specification is proven faithfully. Review these first.
 
 **Unverified code**
-- `shell/main.c`, `shell/site.c`, `shell/sandbox.c`.
+- `shell/main.c`, `shell/site.c`, `shell/sandbox.c` (tested: end-to-end suite, -O0..-Os matrix, ASan/UBSan, fuzzers).
 - Offline tool `tools/prepare-cert.py` (runs at deploy time, not in the server).
 
 **Environment**

@@ -46,16 +46,21 @@ Already in place (verified on the built binary: PIE, `RELRO`+`BIND_NOW`, non-exe
 - **seccomp allowlist** (~18 syscalls); anything else kills the process (no `execve`, `open`, `socket`, `ptrace`, ...).
 - **Site in memory**, no per-request filesystem access; optional `--user` privilege drop.
 
-Recommended next (not done yet): `-fcf-protection=full` (CET/IBT on supporting CPUs), static linking with a minimal libc
-(smaller attack surface, no `rt_sigprocmask`-style surprises), run under a dedicated user/cgroup/systemd unit with
-`MemoryMax`/`TasksMax`, `pf` rate limits per source, a watchdog/restart, and separate privilege domain for TLS keys
-(e.g. a tiny signing helper process holding the private key — would shrink what a compromised worker can steal).
+Also done: `-fcf-protection=full`, `-fstack-clash-protection`, `-ftrivial-auto-var-init=zero`, `_FORTIFY_SOURCE=3`, a fully static-PIE build
+(`make server-static`, no dynamic loader/NSS; privilege drop via numeric `--uid/--gid`), and `deploy/secure-web-server.service`
+(systemd: capability bounding set, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, `MemoryMax`, `TasksMax`, AF filtering).
+
+Still recommended: `pf` rate limits per source, a watchdog, and a separate privilege domain for the TLS private key
+(a tiny signing helper process, so a compromised worker cannot read the key) — not implemented: it requires changing the
+verified flight builder to request signatures over IPC.
 
 ## 4. Checking that the binary matches the C matches the spec
 
 What exists and what it costs, honestly ranked by value for this project:
 
-1. **Differential/test-based (cheap, doing it):** run the extracted C under ASan/UBSan, fuzz it (done: 3.5k mutated
+1. **Differential/test-based (done):** `make test-matrix` runs the full end-to-end suite on builds at -O0/-O1/-O2/-O3/-Os and under ASan+UBSan
+   (all pass); `make fuzz` runs a 500k-iteration in-process fuzzer over `Http_Server_handle` and `Tls_Conn_input` (mutated requests/ClientHellos, random
+   keyed states) checking sanitizer cleanliness and the output invariants. Original description: run the extracted C under ASan/UBSan, fuzz it (done: 3.5k mutated
    ClientHellos, raw HTTP suite), and compare behaviour across compilers/opt levels (gcc -O0/-O2/-O3, clang). Catches miscompilation
    and UB-dependent behaviour empirically. Easy to extend with libFuzzer/AFL on `Http_Server_handle` and `Tls_Conn_input`.
 2. **Verified compiler (medium):** compile the extracted C with **CompCert** (proved semantics-preserving to assembly).
