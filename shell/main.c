@@ -16,7 +16,6 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
-#include <pwd.h>
 #include <grp.h>
 #include <sys/random.h>
 #include "Http_Server.h"
@@ -221,16 +220,17 @@ static int load_file(const char *path, uint8_t **buf, uint32_t *len, uint32_t ma
 static void on_sig(int s) { (void)s; stop = 1; }
 
 int main(int argc, char **argv) {
-  const char *root = NULL, *bind_a = "0.0.0.0", *user = NULL, *cert = NULL, *keyf = NULL;
+  const char *root = NULL, *bind_a = "0.0.0.0", *uidarg = NULL, *gidarg = NULL, *cert = NULL, *keyf = NULL;
   int port = 8080;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
     else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--bind") && i + 1 < argc) bind_a = argv[++i];
-    else if (!strcmp(argv[i], "--user") && i + 1 < argc) user = argv[++i];
+    else if (!strcmp(argv[i], "--uid") && i + 1 < argc) uidarg = argv[++i];
+    else if (!strcmp(argv[i], "--gid") && i + 1 < argc) gidarg = argv[++i];
     else if (!strcmp(argv[i], "--tls-chain") && i + 1 < argc) cert = argv[++i];
     else if (!strcmp(argv[i], "--tls-key") && i + 1 < argc) keyf = argv[++i];
-    else { fprintf(stderr, "usage: %s --root DIR [--port N] [--bind ADDR] [--user NAME] [--tls-chain FILE --tls-key FILE]\n", argv[0]); return 2; }
+    else { fprintf(stderr, "usage: %s --root DIR [--port N] [--bind ADDR] [--uid N --gid N] [--tls-chain FILE --tls-key FILE]\n", argv[0]); return 2; }
   }
   if (!root) { fprintf(stderr, "--root required\n"); return 2; }
   if (!!cert != !!keyf) { fprintf(stderr, "--tls-chain and --tls-key go together\n"); return 2; }
@@ -260,10 +260,12 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   struct sigaction sa = { .sa_handler = on_sig }; sigaction(SIGINT, &sa, NULL); sigaction(SIGTERM, &sa, NULL);
 
-  if (user) {
-    struct passwd *pw = getpwnam(user);
-    if (!pw) { fprintf(stderr, "no such user %s\n", user); return 1; }
-    if (setgroups(0, NULL) || setgid(pw->pw_gid) || setuid(pw->pw_uid)) { perror("drop privileges"); return 1; }
+  if (uidarg || gidarg) {                 /* numeric ids: no NSS/libc user database needed (static-friendly) */
+    if (!uidarg || !gidarg) { fprintf(stderr, "--uid and --gid go together\n"); return 2; }
+    uid_t u = (uid_t)strtoul(uidarg, NULL, 10); gid_t g = (gid_t)strtoul(gidarg, NULL, 10);
+    if (u == 0 || g == 0) { fprintf(stderr, "refusing to run as uid/gid 0\n"); return 2; }
+    if (setgroups(0, NULL) || setgid(g) || setuid(u)) { perror("drop privileges"); return 1; }
+    if (setuid(0) == 0) { fprintf(stderr, "privilege drop is reversible!\n"); return 1; }
   }
   if (sandbox_enter()) { fprintf(stderr, "sandbox failed\n"); return 1; }
   fprintf(stderr, "listening on %s:%d\n", bind_a, port);

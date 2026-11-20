@@ -7,10 +7,11 @@ KaRaMeL, and linked against HACL* for cryptography. A ~500-line unverified C she
     scripts/setup-toolchain.sh          # F* + EverParse (needs `gh`)
     git clone --depth 1 https://github.com/hacl-star/hacl-star .toolchain/hacl-star   # only needed to refresh csrc/hacl
     make verify                         # machine-check all F* sources
-    make server                         # extract to C + build _build/server
+    make server                         # extract to C + build _build/server (make server-static for deployment)
+    make test-matrix fuzz               # differential builds (-O0..-Os, ASan/UBSan) and in-process fuzzing
     test/run.sh                         # 20 end-to-end checks (HTTP, TLS 1.3, hostile input)
 
     python3 tools/prepare-cert.py fullchain.pem privkey.pem certs/      # ECDSA P-256 only
-    _build/server --root ./site --port 443 --tls-chain certs/chain.bin --tls-key certs/key.bin --user nobody
+    _build/server --root ./site --port 443 --tls-chain certs/chain.bin --tls-key certs/key.bin --uid 65534 --gid 65534
 
 Read `docs/PROOFS.md` (what is proved vs tested), `docs/TRUST.md` (what you must trust), `docs/POLICY.md` (what is supported).

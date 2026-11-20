@@ -12,7 +12,11 @@ MODS := Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
         Tls.Util Tls.Crypto Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 CC ?= gcc
-CFLAGS ?= -std=gnu11 -O2 -Wall -Wextra -Wno-parentheses -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE
+OUT ?= _build/server
+HARDEN := -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fPIE
+OPT ?= -O2
+CFLAGS ?= -std=gnu11 $(OPT) -Wall -Wextra -Wno-parentheses $(HARDEN)
+LDFLAGS ?= -pie -Wl,-z,relro,-z,now,-z,noexecstack
 HACL_SRC := $(addprefix csrc/hacl/,Hacl_AEAD_Chacha20Poly1305.c Hacl_Bignum256.c Hacl_Bignum.c Hacl_Chacha20.c \
   Hacl_Curve25519_51.c Hacl_Hash_Base.c Hacl_Hash_MD5.c Hacl_Hash_SHA1.c Hacl_Hash_SHA2.c Hacl_HKDF.c Hacl_HMAC.c \
   Hacl_MAC_Poly1305.c Hacl_P256.c Lib_Memzero0.c Hacl_Hash_SHA3.c Hacl_Hash_Blake2b.c Hacl_Hash_Blake2s.c \
@@ -20,7 +24,7 @@ HACL_SRC := $(addprefix csrc/hacl/,Hacl_AEAD_Chacha20Poly1305.c Hacl_Bignum256.c
   csrc/hacl/aesgcm-x86_64-linux.S csrc/hacl/cpuid-x86_64-linux.S csrc/hacl/poly1305-x86_64-linux.S
 export PATH := $(E)/bin:$(PATH)
 
-.PHONY: verify c server clean
+.PHONY: verify c server server-static test-matrix fuzz clean
 verify:
 	@mkdir -p $(CACHE)
 	@fail=0; for m in $(MODS); do printf "%-28s" $$m; out=$$($(FSTAR) $(FSTFLAGS) src/$$m.fst 2>&1); \
@@ -40,8 +44,26 @@ c:
 	@for h in Hacl_P256 Hacl_Hash_SHA2 Hacl_HMAC Hacl_HKDF Hacl_Curve25519_51 Hacl_AEAD_Chacha20Poly1305; do echo "#include <$$h.h>" > _build/c/internal/$$h.h; done
 
 server: c
-	$(CC) $(CFLAGS) -I_build/c -Icsrc/hacl -Icsrc/krml -Ishell -o _build/server \
-	  shell/main.c shell/site.c shell/sandbox.c _build/c/Http_Server.c _build/c/Tls_Conn.c $(HACL_SRC) -pie -Wl,-z,relro,-z,now
+	$(CC) $(CFLAGS) -I_build/c -Icsrc/hacl -Icsrc/krml -Ishell -o $(OUT) \
+	  shell/main.c shell/site.c shell/sandbox.c _build/c/Http_Server.c _build/c/Tls_Conn.c $(HACL_SRC) $(LDFLAGS)
+
+# fully static PIE (no dynamic loader/libc search, smaller attack surface); recommended for deployment
+server-static:
+	$(MAKE) server LDFLAGS="-static-pie -Wl,-z,relro,-z,now,-z,noexecstack" OUT=_build/server-static
+
+# differential testing: same sources, different optimization levels (+sanitizers), same test suite
+test-matrix:
+	@for o in -O0 -O1 -O2 -O3 -Os; do echo "=== $$o"; $(MAKE) -s server OPT=$$o OUT=_build/server$$o >/dev/null 2>&1 || exit 1; \
+	  BIN=_build/server$$o test/run.sh | tail -1; done
+	@echo "=== ASan+UBSan -O1"; $(MAKE) -s server OPT="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined" \
+	  LDFLAGS="-pie -fsanitize=address,undefined" OUT=_build/server-asan >/dev/null 2>&1 || exit 1; \
+	  ASAN_OPTIONS=detect_leaks=0 BIN=_build/server-asan test/run.sh | tail -1
+
+# in-process fuzzing of the extracted entry points under ASan+UBSan
+fuzz: c
+	$(CC) -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wno-parentheses -I_build/c -Icsrc/hacl -Icsrc/krml \
+	  -o _build/fuzz test/fuzz_inproc.c _build/c/Http_Server.c _build/c/Tls_Conn.c $(HACL_SRC) -fsanitize=address,undefined
+	ASAN_OPTIONS=detect_leaks=0 _build/fuzz $(or $(ITERS),400000)
 
 clean:
 	rm -rf _build
