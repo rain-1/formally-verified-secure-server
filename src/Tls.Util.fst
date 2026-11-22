@@ -139,13 +139,22 @@ let rd24 b pos =
 val ct_eq : a:ibuf -> b:ibuf -> n:U32.t{U32.v n = B.length a /\ U32.v n = B.length b}
   -> i:U32.t{U32.v i <= U32.v n} -> acc:U8.t
   -> Stack bool (requires fun h -> B.live h a /\ B.live h b)
-     (ensures fun h0 _ h1 -> h0 == h1) (decreases (U32.v n - U32.v i))
+     (ensures fun h0 r h1 -> h0 == h1 /\
+        (r <==> acc = 0uy /\
+           (forall (j:nat). U32.v i <= j /\ j < U32.v n ==>
+              S.index (B.as_seq h0 a) j == S.index (B.as_seq h0 b) j)))
+     (decreases (U32.v n - U32.v i))
 let rec ct_eq a b n i acc =
   if i = n then acc = 0uy
   else begin
     let x = B.index a i in
     let y = B.index b i in
-    ct_eq a b n (U32.add i 1ul) (U8.logor acc (U8.logxor x y))
+    let diff = U8.logxor x y in
+    FStar.UInt.logxor_self #8 (U8.v x);
+    FStar.UInt.logxor_neq_nonzero #8 (U8.v x) (U8.v y);
+    FStar.UInt.logor_ge #8 (U8.v acc) (U8.v diff);
+    FStar.UInt.logor_lemma_1 #8 (U8.v acc);
+    ct_eq a b n (U32.add i 1ul) (U8.logor acc diff)
   end
 
 (* literal at position: true iff b[off..off+l) == lit and off+l <= hi *)

@@ -42,6 +42,8 @@ python3 test/raw.py 2>&1 | grep -v slowloris > test/raw.out
 check "raw suite: 400 no-host/two-hosts/CL:5/TE/obs-fold/NUL/space" \
   '[ $(grep -cE "^(no host|two hosts|http/1.0|CL:5 body|TE chunked|obs-fold|NUL in header|space in target|garbage|target >2k).*HTTP/1.1 400" test/raw.out) = 10 ]'
 check "raw suite: 431 oversized header, pipelining answers 2"  'grep -q "header >8k *HTTP/1.1 431" test/raw.out && grep -q "2 pipelined.*\[2 resp\]" test/raw.out'
+check "raw suite: 100 headers accepted, 101 rejected" \
+  'grep -q "100 header lines *HTTP/1.1 200" test/raw.out && grep -q "101 header lines *HTTP/1.1 400" test/raw.out'
 echo "== TLS 1.3"
 check "openssl s_client + cert verify (ChaCha20)" \
   '(printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"; sleep 0.5) | openssl s_client -connect 127.0.0.1:18443 -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256 -CAfile test/tls/cert.pem -verify_return_error -quiet -servername localhost 2>&1 | grep -q "<h1>hello"'

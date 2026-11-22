@@ -29,6 +29,8 @@ cases = {
  "DELETE":               b"DELETE / HTTP/1.1\r\n"+H+b"\r\n",
  "garbage":              b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03\r\n\r\n",
  "2 pipelined":          b"GET / HTTP/1.1\r\n"+H+b"\r\nGET /style.css HTTP/1.1\r\n"+H+b"Connection: close\r\n\r\n",
+ "100 header lines":     b"GET / HTTP/1.1\r\n"+H+b"Connection: close\r\n"+b"X: a\r\n"*98+b"\r\n",
+ "101 header lines":     b"GET / HTTP/1.1\r\n"+H+b"Connection: close\r\n"+b"X: a\r\n"*99+b"\r\n",
  "header >8k":           b"GET / HTTP/1.1\r\n"+H+b"X: "+b"a"*9000+b"\r\n\r\n",
  "target >2k":           b"GET /"+b"a"*3000+b" HTTP/1.1\r\n"+H+b"\r\n",
  "conn: close":          b"GET / HTTP/1.1\r\n"+H+b"Connection: Keep-Alive, CLOSE\r\n\r\n",

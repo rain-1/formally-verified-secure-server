@@ -115,36 +115,82 @@ let traffic_keys key iv secret suite =
   expand_label iv 12ul secret li ni empty 0ul;
   pop_frame ()
 
+[@@"opaque_to_smt"]
+let nonce_suffix (old:S.seq U8.t{S.length old = 12}) (out:S.seq U8.t{S.length out = 12})
+    (iv:S.seq U8.t{S.length iv = 12})
+    (seq:S.seq U8.t{S.length seq = 8}) (i:nat{i <= 12}) : prop =
+  (forall (j:nat). j < i ==> S.index out j == S.index old j) /\
+  (forall (j:nat). i <= j /\ j < 12 ==>
+     U8.v (S.index out j) == Spec.nonce_byte iv seq j)
+
 (* nonce = iv XOR (0^4 || seq) *)
 val make_nonce : nonce:ibuf{B.length nonce = 12} -> iv:ibuf{B.length iv = 12} -> seq:ibuf{B.length seq = 8}
   -> i:U32.t{U32.v i <= 12}
   -> Stack unit
      (requires fun h -> B.live h nonce /\ B.live h iv /\ B.live h seq /\ B.disjoint nonce iv /\ B.disjoint nonce seq)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer nonce) h0 h1) (decreases (12 - U32.v i))
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer nonce) h0 h1 /\
+        nonce_suffix (B.as_seq h0 nonce) (B.as_seq h1 nonce) (B.as_seq h0 iv) (B.as_seq h0 seq) (U32.v i))
+     (decreases (12 - U32.v i))
+#push-options "--split_queries always --z3rlimit 45"
 let rec make_nonce nonce iv seq i =
-  if i = 12ul then ()
-  else begin
+  let h0 = get () in
+  if i <> 12ul then begin
     let v = B.index iv i in
     let s = if U32.lt i 4ul then 0uy else B.index seq (U32.sub i 4ul) in
-    B.upd nonce i (U8.logxor v s);
-    make_nonce nonce iv seq (U32.add i 1ul)
-  end
+    let x = U8.logxor v s in
+    assert (U8.v x == Spec.nonce_byte (B.as_seq h0 iv) (B.as_seq h0 seq) (U32.v i));
+    B.upd nonce i x;
+    let hm = get () in
+    let next = U32.add i 1ul in
+    make_nonce nonce iv seq next;
+    let h1 = get () in
+    reveal_opaque (`%nonce_suffix)
+      (nonce_suffix (B.as_seq hm nonce) (B.as_seq h1 nonce) (B.as_seq hm iv) (B.as_seq hm seq) (U32.v next))
+  end;
+  let h1 = get () in
+  reveal_opaque (`%nonce_suffix)
+    (nonce_suffix (B.as_seq h0 nonce) (B.as_seq h1 nonce) (B.as_seq h0 iv) (B.as_seq h0 seq) (U32.v i))
+#pop-options
+
+[@@"opaque_to_smt"]
+let incremented_prefix (old:S.seq U8.t{S.length old = 8}) (out:S.seq U8.t{S.length out = 8})
+    (i:nat{i <= 8}) : prop =
+  forall (j:nat). j < 8 ==>
+    (let byte = S.index old j in
+     let carry = j < i /\
+       (forall (k:nat). j < k /\ k < i ==> S.index old k == 255uy) in
+     (carry ==> S.index out j == U8.add_mod byte 1uy) /\
+     (~carry ==> S.index out j == byte))
 
 (* big-endian increment; callers must first check seq_ok so it can never wrap *)
 val inc_seq : seq:ibuf{B.length seq = 8} -> i:U32.t{U32.v i <= 8}
   -> Stack unit (requires fun h -> B.live h seq)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer seq) h0 h1) (decreases (U32.v i))
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer seq) h0 h1 /\
+        incremented_prefix (B.as_seq h0 seq) (B.as_seq h1 seq) (U32.v i))
+     (decreases (U32.v i))
 let rec inc_seq seq i =
-  if i = 0ul then ()
-  else begin
+  let h0 = get () in
+  if i <> 0ul then begin
     let j = U32.sub i 1ul in
     let v = B.index seq j in
-    if v = 255uy then (B.upd seq j 0uy; inc_seq seq j) else B.upd seq j (U8.add v 1uy)
-  end
+    if v = 255uy then begin
+      B.upd seq j 0uy;
+      let hm = get () in
+      inc_seq seq j;
+      let h1 = get () in
+      reveal_opaque (`%incremented_prefix)
+        (incremented_prefix (B.as_seq hm seq) (B.as_seq h1 seq) (U32.v j))
+    end else B.upd seq j (U8.add v 1uy)
+  end;
+  let h1 = get () in
+  reveal_opaque (`%incremented_prefix)
+    (incremented_prefix (B.as_seq h0 seq) (B.as_seq h1 seq) (U32.v i))
 
 (* sequence numbers are limited to < 2^48: never wraps *)
 val seq_ok : seq:ibuf{B.length seq = 8}
-  -> Stack bool (requires fun h -> B.live h seq) (ensures fun h0 _ h1 -> h0 == h1)
+  -> Stack bool (requires fun h -> B.live h seq)
+     (ensures fun h0 r h1 -> h0 == h1 /\
+        (r <==> S.index (B.as_seq h0 seq) 0 == 0uy /\ S.index (B.as_seq h0 seq) 1 == 0uy))
 let seq_ok seq =
   let a = B.index seq 0ul in
   let b = B.index seq 1ul in
@@ -218,7 +264,12 @@ let unseal key iv seq hdr body n inner suite =
 (* index of last nonzero byte in b[0..i), or n (= length b) if none (all padding) *)
 val last_nz : b:ibuf -> n:U32.t{U32.v n = B.length b} -> i:U32.t{U32.v i <= U32.v n}
   -> Stack U32.t (requires fun h -> B.live h b)
-     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r <= U32.v n) (decreases (U32.v i))
+     (ensures fun h0 r h1 -> h0 == h1 /\
+        (U32.v r = U32.v n \/
+         (U32.v r < U32.v i /\ S.index (B.as_seq h0 b) (U32.v r) <> 0uy)) /\
+        (forall (j:nat). j < U32.v i /\ (r = n \/ U32.v r < j) ==>
+           S.index (B.as_seq h0 b) j == 0uy))
+     (decreases (U32.v i))
 let rec last_nz b n i =
   if i = 0ul then n
   else begin

@@ -37,9 +37,20 @@ inline_for_extraction let o_aesok : U32.t = 246ul   (* 1 if the CPU supports the
 
 (* phases: 0 wait ClientHello, 1 wait client Finished, 2 connected, 3 closed *)
 
+let stored_trlen (s:S.seq U8.t{S.length s = 512}) : GTot nat =
+  U8.v (S.index s 240) + 256 * U8.v (S.index s 241)
+
+(* Match tr_hash's handling of a length outside the transcript buffer. *)
+let trlen_g (s:S.seq U8.t{S.length s = 512}) : GTot (n:nat{n <= 20480}) =
+  let n = stored_trlen s in
+  if n > 20480 then 0 else n
+
+let transcript (hst:HS.mem) (st:stb) (tr:trb) : GTot Spec.bytes =
+  S.slice (B.as_seq hst tr) 0 (trlen_g (B.as_seq hst st))
+
 val get_trlen : st:stb -> Stack U32.t (requires fun h -> B.live h st)
   (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536 /\
-     U32.v r = U8.v (S.index (B.as_seq h0 st) 240) + 256 * U8.v (S.index (B.as_seq h0 st) 241))
+     U32.v r = stored_trlen (B.as_seq h0 st))
 let get_trlen st =
   let a = B.index st 240ul in
   let b = B.index st 241ul in
@@ -48,8 +59,11 @@ let get_trlen st =
   U32.add (FStar.Int.Cast.uint8_to_uint32 a) (U32.shift_left (FStar.Int.Cast.uint8_to_uint32 b) 8ul)
 
 val set_trlen : st:stb -> v:U32.t{U32.v v < 65536} -> Stack unit (requires fun h -> B.live h st)
-  (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+  (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
+     stored_trlen (B.as_seq h1 st) = U32.v v)
 let set_trlen st v =
+  assert_norm (pow2 8 = 256);
+  FStar.UInt.logand_mask #32 (U32.v v) 8;
   B.upd st 240ul (FStar.Int.Cast.uint32_to_uint8 (U32.logand v 255ul));
   B.upd st 241ul (FStar.Int.Cast.uint32_to_uint8 (U32.shift_right v 8ul))
 
@@ -58,24 +72,26 @@ val tr_add : st:stb -> tr:trb -> msg:ibuf -> mlen:U32.t{U32.v mlen = B.length ms
   -> Stack bool
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h msg /\ B.disjoint st tr /\
         B.disjoint st msg /\ B.disjoint tr msg)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) h0 h1)
+     (ensures fun h0 ok h1 ->
+        (let n = stored_trlen (B.as_seq h0 st) in
+         ok == (n + U32.v mlen <= 20480)) /\
+        (if ok then
+           B.modifies (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) h0 h1 /\
+           transcript h1 st tr == S.append (transcript h0 st tr) (B.as_seq h0 msg)
+         else h0 == h1))
 let tr_add st tr msg mlen =
+  let h0 = get () in
   let n = get_trlen st in
   if U32.gt n 20480ul then false
   else if U32.gt mlen (U32.sub 20480ul n) then false
   else begin
-    B.blit msg 0ul tr n mlen;
-    set_trlen st (U32.add n mlen);
+    let next = put_buf tr n msg mlen in
+    set_trlen st next;
+    let h1 = get () in
+    S.lemma_eq_intro (transcript h1 st tr)
+      (S.append (transcript h0 st tr) (B.as_seq h0 msg));
     true
   end
-
-(* ghost view: the transcript bytes currently held (length clamped exactly as tr_hash clamps it) *)
-let trlen_g (s:S.seq U8.t{S.length s = 512}) : GTot (n:nat{n <= 20480}) =
-  let n = U8.v (S.index s 240) + 256 * U8.v (S.index s 241) in
-  if n > 20480 then 0 else n
-
-let transcript (hst:HS.mem) (st:stb) (tr:trb) : GTot Spec.bytes =
-  S.slice (B.as_seq hst tr) 0 (trlen_g (B.as_seq hst st))
 
 val tr_hash : st:stb -> tr:trb -> out:ibuf{B.length out = 32}
   -> Stack unit
@@ -88,6 +104,9 @@ let tr_hash st tr out =
   let t = B.sub tr 0ul n in
   Hacl.Hash.SHA2.hash_256 out t n
 
+unfold let phase_at (h:HS.mem) (st:stb) : GTot U8.t =
+  S.index (B.as_seq h st) (U32.v o_phase)
+
 (* protect+emit one record with the server's current write keys. Returns 0 if seq exhausted. *)
 val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.length plain /\ U32.v plen <= 16384}
   -> out:ibuf{B.length out >= U32.v plen + 22}
@@ -95,7 +114,7 @@ val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.l
      (requires fun h -> B.live h st /\ B.live h plain /\ B.live h out /\
         B.disjoint st plain /\ B.disjoint st out /\ B.disjoint plain out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\
-        (U32.v r = 0 \/ U32.v r = U32.v plen + 22))
+        (U32.v r = 0 \/ U32.v r = U32.v plen + 22) /\ phase_at h1 st == phase_at h0 st)
 let send_rec st ctype plain plen out =
   push_frame ();
   let key = B.alloca 0uy 32ul in
@@ -109,7 +128,11 @@ let send_rec st ctype plain plen out =
     if ok then begin
       let suite = B.index st o_suite in
       let n = seal key iv seq ctype plain plen out suite in
+      let before = get () in
       B.blit seq 0ul st o_sseq 8ul;
+      let after = get () in
+      S.lemma_index_slice (B.as_seq before st) 0 (U32.v o_sseq) (U32.v o_phase);
+      S.lemma_index_slice (B.as_seq after st) 0 (U32.v o_sseq) (U32.v o_phase);
       n
     end else 0ul in
   pop_frame ();
@@ -119,7 +142,8 @@ let send_rec st ctype plain plen out =
 val send_alert : st:stb -> level:U8.t -> desc:U8.t -> out:ibuf{B.length out >= 24}
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h out /\ B.disjoint st out)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\ U32.v r <= 24)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\ U32.v r <= 24 /\
+        phase_at h1 st == phase_at h0 st)
 let send_alert st level desc out =
   let ph = B.index st o_phase in
   if ph = 0uy then begin

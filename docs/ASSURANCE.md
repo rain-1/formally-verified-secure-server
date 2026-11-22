@@ -7,7 +7,7 @@
 | 0 Intent | "serve exactly the site, to anyone, safely" | nothing (informal) | human review | Is the intent right? (e.g. should dotfiles be served?) |
 | 1 Policy/spec | `docs/POLICY.md`, `src/Http.Spec.fst` | Layer 0 | **human review**; spec theorem `key_of_wf` (keys cannot contain `.`/`..`/empty segments) | A wrong spec is proved faithfully. |
 | 2 Protocol standards | RFC 9110/9112 (HTTP), RFC 8446 (TLS 1.3), RFC 5480/6979 (ECDSA) | — | we implement a **strict subset**; unsupported things are rejected, not guessed | Subset choice is ours; no formal model of the RFCs exists in this repo. |
-| 3 Verified source | `src/*.fst` (Low*) | Layer 1 (path code: functional refinement) / Low* memory model (everything) | **F\* + Z3 proofs** | TLS & header grammar have *only* memory-safety proofs; their match to the RFCs is by interop tests. |
+| 3 Verified source | `src/*.fst` (Low*) | Path resolution and selected TLS functions refine written specifications. The Low* memory model covers all project F* modules. | **F\* + Z3 proofs** | See PROOFS.md for the scope of the TLS proofs and the interoperability tests. |
 | 4 Generated C | `_build/c/*.c` | Layer 3 | KaRaMeL's translation (trusted, widely used by HACL*/EverParse) | KaRaMeL bugs; we do not re-validate its output. |
 | 5 Crypto | `csrc/hacl` (HACL*, EverCrypt, Vale) | HACL*'s own F*/Vale proofs | published upstream proofs; our `assume val` contracts state only memory facts | We trust upstream proofs and our reading of their C API. |
 | 6 Shell | `shell/*.c` | nothing formal | small, reviewed, sanitizer-tested, sandboxed | Bugs here are unproved (but see §3). |
@@ -26,9 +26,8 @@
 - If something does go wrong in the process, the sandbox (§3) limits what an attacker can do.
 
 **Not to expect**
-- "Provably secure TLS." We prove memory safety of our TLS code, not that the handshake logic is correct or secure.
-  A logic bug (wrong transcript, skipped check) would not be caught by the proofs; interop tests only show the
-  happy path and some error paths work.
+- A protocol security theorem for TLS. The proofs cover memory safety, transcript buffer operations, and selected key schedule and Finished computations.
+  Handshake sequencing and validation rely on interoperability and negative tests.
 - Protection against DoS (slowloris is mitigated by timeouts/limits; floods are for `pf`/the network).
 - Side-channel freedom beyond constant-time primitives (no cache/branch-predictor/Spectre analysis of our code or gcc's output).
 - Correctness of compiled code beyond what gcc gives. No translation validation is done (see §4).
@@ -71,10 +70,9 @@ What exists and what it costs, honestly ranked by value for this project:
    (`norm_key`, `scan_ok`), impractical for the whole server; value is mostly for the highest-risk functions.
 4. **Constant-time at binary level (medium):** `ctgrind`/Valgrind-based or `dudect` timing tests on the compiled crypto paths; Binsec/Rel or
    `haybale-pitchfork` for formal checks. HACL*/Vale already do this for primitives; our own code does not branch on secrets.
-5. **Spec-to-code gap for TLS (the biggest real gap):** the effective way to close it is not binary analysis but *more proof
-   at the source level*: (a) state the key schedule and record protection as pure F* specs against HACL*'s `Spec.Agile.*` and prove
-   the Low* code refines them; (b) generate message parsers with EverParse so parsing is proved against a grammar;
-   (c) test against an independent implementation's test vectors (RFC 8448 traces) in CI.
+5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation have proofs against F* specifications built on HACL*'s
+   `Spec.Agile.*`. EverParse validates ClientHello framing. Record protection, handshake sequencing, and the remaining parsers
+   are candidates for further source-level proofs. RFC 8448 traces could independently check the extracted code.
 
 Recommended order: 1 (extend now) -> 5 (biggest security payoff) -> 2 (if you want gcc out of the TCB) -> 3/4 selectively.
 

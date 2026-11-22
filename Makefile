@@ -11,6 +11,7 @@ FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fst
 MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
         Tls.Util Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
+FST_SOURCES := $(addprefix src/,$(addsuffix .fst,$(MODS)))
 CC ?= gcc
 OUT ?= _build/server
 HARDEN := -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fPIE
@@ -27,9 +28,11 @@ export PATH := $(E)/bin:$(PATH)
 .PHONY: verify c server server-static test-matrix fuzz clean
 verify:
 	@mkdir -p $(CACHE)
-	@fail=0; for m in $(MODS); do printf "%-28s" $$m; out=$$($(FSTAR) $(FSTFLAGS) src/$$m.fst 2>&1); \
-	  if echo "$$out" | grep -q "^\* Error"; then echo FAILED; echo "$$out" | grep -A6 "^\* Error"; fail=1; \
-	  else echo "ok"; fi; done; exit $$fail
+	@for source in $(FST_SOURCES); do \
+	  printf '%-36s' "$$source"; \
+	  if out=$$($(FSTAR) $(FSTFLAGS) "$$source" 2>&1); then echo ok; \
+	  else echo FAILED; printf '%s\n' "$$out"; exit 1; fi; \
+	done
 
 c:
 	rm -rf _build/c && mkdir -p _build/c
@@ -38,7 +41,8 @@ c:
 	  -bundle 'Tls.Conn=Tls.Conn,Tls.Server,Tls.Flight,Tls.Kdf,Tls.State,Tls.Crypto,Tls.Hello,Tls.Util' \
 	  -bundle Tls.ChValid -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
 	  -bundle Hacl.AEAD_Chacha20Poly1305 -bundle Hacl.P256 -bundle EverCrypt.AEAD -skip-compilation -warn-error -1..27 \
-	  $(addprefix src/,$(addsuffix .fst,$(MODS))) > _build/krml.log 2>&1; test -f _build/c/Tls_Conn.c
+	  $(FST_SOURCES) > _build/krml.log 2>&1 || { cat _build/krml.log; exit 1; }
+	test -f _build/c/Http_Server.c && test -f _build/c/Tls_Conn.c
 	@# warnings are fatal only for OUR code (ghost HACL* spec modules trigger benign ones before being dropped)
 	@! grep -E '^Warning [0-9]+: .*(Tls\.(Util|Crypto|Hello|State|Kdf|Flight|Server|Conn)|Http\.(Core|Parse|Server)|Hacl\.(Hash|HMAC|HKDF|Curve|AEAD|P256)|EverCrypt)' _build/krml.log
 	@# HACL* is linked from the vendored upstream C: replace krml's generated stub headers with forwarders
@@ -55,11 +59,15 @@ server-static:
 
 # differential testing: same sources, different optimization levels (+sanitizers), same test suite
 test-matrix:
-	@for o in -O0 -O1 -O2 -O3 -Os; do echo "=== $$o"; $(MAKE) -s server OPT=$$o OUT=_build/server$$o >/dev/null 2>&1 || exit 1; \
-	  BIN=_build/server$$o test/run.sh | tail -1; done
+	@mkdir -p _build
+	@for o in -O0 -O1 -O2 -O3 -Os; do echo "=== $$o"; \
+	  $(MAKE) -s server OPT=$$o OUT=_build/server$$o > _build/matrix-build.log 2>&1 || { cat _build/matrix-build.log; exit 1; }; \
+	  BIN=_build/server$$o test/run.sh > _build/matrix-test.log 2>&1 || { cat _build/matrix-test.log; exit 1; }; \
+	  tail -1 _build/matrix-test.log; done
 	@echo "=== ASan+UBSan -O1"; $(MAKE) -s server OPT="-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined" \
-	  LDFLAGS="-pie -fsanitize=address,undefined" OUT=_build/server-asan >/dev/null 2>&1 || exit 1; \
-	  ASAN_OPTIONS=detect_leaks=0 BIN=_build/server-asan test/run.sh | tail -1
+	  LDFLAGS="-pie -fsanitize=address,undefined" OUT=_build/server-asan > _build/matrix-build.log 2>&1 || { cat _build/matrix-build.log; exit 1; }; \
+	  ASAN_OPTIONS=detect_leaks=0 BIN=_build/server-asan test/run.sh > _build/matrix-test.log 2>&1 || { cat _build/matrix-test.log; exit 1; }; \
+	  tail -1 _build/matrix-test.log
 
 # in-process fuzzing of the extracted entry points under ASan+UBSan
 fuzz: c

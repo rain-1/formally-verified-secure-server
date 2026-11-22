@@ -1,7 +1,6 @@
 module Tls.Spec
-(* SPECIFICATION of the TLS 1.3 key-schedule pieces we implement (RFC 8446 section 7.1, RFC 5869 HKDF).
-   The hash / HMAC / HKDF functions are ABSTRACT here: the binding modules (src/Hacl.*.fst) assume that the
-   HACL* C functions compute them. Linking these to the HACL-star F-star specs (Spec.Agile) is future work. *)
+(* TLS 1.3 key derivation and Finished (RFC 8446 sections 7.1, 7.3, and 4.4.4).
+   The binding modules assume that HACL* C implements the vendored Spec.Agile specifications. *)
 module S = FStar.Seq
 module U8 = FStar.UInt8
 
@@ -75,3 +74,9 @@ let finished_key (secret:bytes{S.length secret = 32}) : b:bytes{S.length b = 32}
   expand_label secret 32 (lit_bytes "finished") S.empty
 let finished_verify (secret:bytes{S.length secret = 32}) (th:bytes{S.length th = 32}) : b:bytes{S.length b = 32} =
   hmac256 (finished_key secret) th
+
+(* RFC 8446 section 5.3. The sequence number is already encoded big-endian. *)
+let nonce_byte (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8})
+               (i:nat{i < 12}) : FStar.UInt.uint_t 8 =
+  FStar.UInt.logxor #8 (U8.v (S.index iv i))
+    (if i < 4 then 0 else U8.v (S.index seq (i - 4)))

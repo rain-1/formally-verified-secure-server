@@ -16,22 +16,44 @@ module Spec = Tls.Spec
 
 #set-options "--z3rlimit 300 --fuel 1 --ifuel 1"
 
+let keys_installed (state:S.seq U8.t{S.length state = 512}) (ko vo so:nat)
+    (suite:U8.t) (secret:Spec.bytes{S.length secret = 32})
+    : Pure prop (requires ko + 32 <= 512 /\ vo + 12 <= 512 /\ so + 8 <= 512)
+                (ensures fun _ -> True) =
+  let kl = if U8.v suite = 1 then 16 else 32 in
+  S.slice state ko (ko + kl) == Spec.traffic_key secret kl /\
+  S.slice state vo (vo + 12) == Spec.traffic_iv secret /\
+  S.slice state so (so + 8) == S.create 8 0uy
+
 (* write AEAD key/iv/seq derived from [secret] into st at offsets ko/vo/so *)
-val install_keys : st:stb -> ko:U32.t{U32.v ko + 32 <= 512} -> vo:U32.t{U32.v vo + 12 <= 512}
-  -> so:U32.t{U32.v so + 8 <= 512} -> secret:ibuf{B.length secret = 32}
+val install_keys : st:stb -> ko:U32.t -> vo:U32.t -> so:U32.t
+  -> secret:ibuf{B.length secret = 32}
   -> Stack unit
-     (requires fun h -> B.live h st /\ B.live h secret /\ B.disjoint st secret)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+     (requires fun h -> B.live h st /\ B.live h secret /\ B.disjoint st secret /\
+        U32.v ko + 32 <= U32.v vo /\ U32.v vo + 12 <= U32.v so /\ U32.v so + 8 <= 512)
+     (ensures fun h0 _ h1 ->
+        B.modifies (B.loc_buffer st) h0 h1 /\
+        keys_installed (B.as_seq h1 st) (U32.v ko) (U32.v vo) (U32.v so)
+          (S.index (B.as_seq h0 st) (U32.v o_suite)) (B.as_seq h0 secret))
+#push-options "--fuel 2 --z3rlimit 500"
 let install_keys st ko vo so secret =
   push_frame ();
   let k = B.alloca 0uy 32ul in
   let v = B.alloca 0uy 12ul in
   let suite = B.index st o_suite in
   traffic_keys k v secret suite;
-  B.blit k 0ul st ko 32ul;
-  B.blit v 0ul st vo 12ul;
-  B.fill (B.sub st so 8ul) 0uy 8ul;
+  let key = B.sub st ko 32ul in
+  let iv = B.sub st vo 12ul in
+  let seq = B.sub st so 8ul in
+  assert (B.disjoint key iv /\ B.disjoint key seq /\ B.disjoint iv seq);
+  B.blit k 0ul key 0ul 32ul;
+  B.blit v 0ul iv 0ul 12ul;
+  B.fill seq 0uy 8ul;
+  let h = get () in
+  FStar.Seq.Properties.slice_slice (B.as_seq h st) (U32.v ko) (U32.v ko + 32) 0
+    (if U8.v suite = 1 then 16 else 32);
   pop_frame ()
+#pop-options
 
 (* Derive-Secret(secret, "derived", "") *)
 val derived : out:ibuf{B.length out = 32} -> secret:ibuf{B.length secret = 32}
@@ -134,7 +156,17 @@ let key_sched st tr shared =
 (* application traffic secrets from st.ms and st.th (CH..server Finished) *)
 val app_secret : st:stb -> label_c:bool
   -> Stack unit (requires fun h -> B.live h st)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+     (ensures fun h0 _ h1 ->
+        B.modifies (B.loc_buffer st) h0 h1 /\
+        (let state = B.as_seq h0 st in
+         let ms = S.slice state (U32.v o_ms) (U32.v o_ms + 32) in
+         let th = S.slice state (U32.v o_th) (U32.v o_th + 32) in
+         if label_c then
+           S.slice (B.as_seq h1 st) (U32.v o_cap) (U32.v o_cap + 32) ==
+             Spec.derive_secret ms (Spec.lit_bytes "c ap traffic") th
+         else
+           keys_installed (B.as_seq h1 st) (U32.v o_skey) (U32.v o_siv) (U32.v o_sseq)
+             (S.index state (U32.v o_suite)) (Spec.derive_secret ms (Spec.lit_bytes "s ap traffic") th)))
 let app_secret st label_c =
   push_frame ();
   let ms = B.alloca 0uy 32ul in
@@ -156,7 +188,11 @@ let app_secret st label_c =
 (* client application keys (from the stored client application secret) *)
 val install_client_app : st:stb
   -> Stack unit (requires fun h -> B.live h st)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1)
+     (ensures fun h0 _ h1 ->
+        B.modifies (B.loc_buffer st) h0 h1 /\
+        (let state = B.as_seq h0 st in
+         keys_installed (B.as_seq h1 st) (U32.v o_ckey) (U32.v o_civ) (U32.v o_cseq)
+           (S.index state (U32.v o_suite)) (S.slice state (U32.v o_cap) (U32.v o_cap + 32))))
 let install_client_app st =
   push_frame ();
   let cap = B.alloca 0uy 32ul in
@@ -168,7 +204,8 @@ let install_client_app st =
 val finished_mac : out:ibuf{B.length out = 32} -> secret:ibuf{B.length secret = 32} -> th:ibuf{B.length th = 32}
   -> Stack unit
      (requires fun h -> B.live h out /\ B.live h secret /\ B.live h th /\ B.disjoint out secret /\ B.disjoint out th /\ B.disjoint secret th)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer out) h0 h1 /\
+        B.as_seq h1 out == Spec.finished_verify (B.as_seq h0 secret) (B.as_seq h0 th))
 let finished_mac out secret th =
   push_frame ();
   let fk = B.alloca 0uy 32ul in

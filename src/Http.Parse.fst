@@ -201,12 +201,14 @@ val scan_headers : b:ibuf -> hend:idx b{U32.v hend + 4 <= B.length b}
   -> pos:idx b{U32.v pos <= U32.v hend + 2} -> res:resbuf -> fuel:U32.t
   -> Stack unit
      (requires fun h -> B.live h b /\ B.live h res /\ B.disjoint b res)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer res) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer res) h0 h1 /\
+        (fuel = 0ul /\ U32.v pos < U32.v hend + 2 ==> B.get h1 res 7 == 1ul))
      (decreases (U32.v fuel))
 let rec scan_headers b hend pos res fuel =
-  if pos = U32.add hend 2ul || fuel = 0ul then ()
+  let lim = U32.add hend 2ul in
+  if pos = lim then ()
+  else if fuel = 0ul then B.upd res 7ul 1ul
   else begin
-    let lim = U32.add hend 2ul in
     let le = find_crlf b lim pos in
     if le = lim then B.upd res 7ul 1ul   (* no terminator: cannot happen, be safe *)
     else begin
