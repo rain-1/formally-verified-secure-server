@@ -6,17 +6,23 @@
 
 All 21 F\* modules pass verification. We specify a narrow protocol subset, check Low\* contracts with F\* and Z3, extract C with KaRaMeL, and compile with GCC. The guarantees depend on the specifications, toolchain, and C binding contracts. [Protocol subset](docs/POLICY.md) · [Proofs](docs/PROOFS.md) · [Trust assumptions](docs/TRUST.md)
 
-| Area | Progress | What it covers |
-|---|---|---|
-| Memory safety | **Proved in the Low\* core** | Buffer bounds, lifetimes, and arithmetic safety under the stated contracts. This addresses out-of-bounds access, use-after-free, and integer overflow in the modeled code. |
-| HTTP functional correctness | **Proved in part** | Target normalization matches the path spec. Lookup and routing select the corresponding site entry. Parser bounds and header-limit rejection are proved. Tests cover header grammar and response bytes. |
-| TLS functional correctness | **Proved in part** | Transcript operations, key derivation and installation, Finished verification, nonces, counters, padding removal, and delivery of application data only in the connected phase. The transcript hash, key derivation, and MAC proofs rely on HACL\* binding contracts. Full handshake correctness and protocol security remain open. |
-| ClientHello parsing | **Generated and verified by EverParse 3D** | The validator checks framing and exact consumption against the local grammar. Integration relies on the generated validator and its C glue. |
-| Constant-time cryptography | **Uses upstream verified primitives** | HACL\*, EverCrypt, and Vale supply crypto designed to avoid secret-dependent branches and memory accesses. Finished comparison scans all MAC bytes. Whole-binary timing and microarchitectural leakage remain unverified. |
-| Executable testing | **21 socket checks passing** | Routing, path confinement, malformed requests, the 100/101-header boundary, and interoperability with both TLS suites. The matrix repeats the suite at five optimization levels and under ASan/UBSan. In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inputs under both sanitizers. |
-| C shell and platform | **Tested and hardened** | The socket loop, site loader, and sandbox are unproved C. The generated binary relies on the compiler, Linux kernel, and hardware. |
+🔴 Started · 🟠 In progress · 🟢 Almost done · 🏁 Complete
 
-ASan detects memory errors on exercised paths. UBSan checks selected undefined behavior, including signed overflow.
+Percentages count completed modules, test cases, or equally weighted roadmap milestones within each row. Fractions show the denominator.
+
+| Area | Progress | Completed | Help finish |
+|---|---|---|---|
+| Low\* memory safety | 🏁 **100%** (21/21 modules) | All core modules verified for bounds, lifetimes, and arithmetic safety under their contracts. | |
+| HTTP functional correctness | 🟠 **67%** (4/6 milestones) | Path normalization, lookup and routing, parser bounds, and header-budget rejection. | Specify and prove the header grammar and response serialization. |
+| TLS functional correctness | 🟠 **60%** (6/10 milestones) | Transcript operations, key derivation and installation, Finished verification, nonce and counter handling, padding removal, and application-data gating. Hash, KDF, and MAC proofs rely on HACL\* contracts. | Prove handshake message layouts and sequencing, CertificateVerify input construction, record protection, and end-to-end protocol security. |
+| ClientHello framing | 🟢 **80%** (4/5 milestones) | EverParse 3D verifies fixed fields, session ID bounds, suite and compression vector lengths, and extension TLV framing against the local grammar. | Verify the C glue’s exact-consumption check and expose that guarantee to F\*. |
+| Constant-time cryptography | 🟠 **50%** (2/4 milestones) | HACL\*, EverCrypt, and Vale supply primitives designed to avoid secret-dependent branches and memory accesses. Finished comparison scans every MAC byte. | Measure timing in the compiled server and analyze microarchitectural leakage. |
+| Current socket test suite | 🏁 **100%** (21/21 tests) | Routing, path confinement, malformed requests, the 100/101-header boundary, and both TLS suites pass. The matrix covers five optimization levels and an ASan/UBSan build. | |
+| C shell assurance | 🔴 **25%** (1/4 milestones) | Tested and hardened baseline. The binary relies on the compiler, Linux kernel, and hardware. | Specify and verify the socket loop, site loader, and sandbox policy. |
+
+In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inputs. ASan detects memory errors on exercised paths. UBSan checks selected undefined behavior, including signed overflow.
+
+**Good places to start.** Pick one header rule and write its Low\* specification, strengthen the ClientHello glue contract, or add a reproducible timing test for the compiled Finished comparison. [HTTP parser](src/Http.Parse.fst) · [ClientHello binding](src/Tls.ChValid.fst) · [Finished comparison](src/Tls.Util.fst)
 
 ## Defense in depth
 
