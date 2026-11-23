@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Plot the README's recorded formalization progress from Git history."""
 
+import argparse
 import math
 import re
 import subprocess
@@ -10,11 +11,17 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PROGRESS = re.compile(r"\b(\d{1,3})%\**\s+\((\d+/\d+) (?:milestones|modules|tests)\)")
-GREEN = "#15754d"
+STATUS_STYLES = {
+    "🔴": ("Started", "#b32635", "o"),
+    "🟠": ("In progress", "#b54b0b", "o"),
+    "🟢": ("Almost done", "#15754d", "o"),
+    "🏁": ("Complete", "#2857a5", "D"),
+}
 INK = "#192c27"
 MUTED = "#516760"
 PAPER = "#fcfdfb"
@@ -38,11 +45,14 @@ def progress(readme):
             if label == "C shell assurance":
                 label = "Shell assurance"
             percentage, fraction = match.groups()
-            rows[label] = (int(percentage), fraction)
+            symbol = status.strip()[0]
+            if symbol not in STATUS_STYLES:
+                raise ValueError(f"Unrecognized progress status for {label}: {status.strip()}")
+            rows[label] = (int(percentage), fraction, symbol)
     return rows
 
 
-def history():
+def history(*, committed_only=False):
     snapshots = []
     for commit in git("rev-list", "--reverse", "--first-parent", "HEAD").splitlines():
         if "README.md" in git("ls-tree", "--name-only", commit, "--", "README.md").splitlines():
@@ -53,61 +63,85 @@ def history():
 
     first = next((i for i, (_, rows) in enumerate(snapshots) if rows), len(snapshots))
     snapshots = snapshots[first:]
-    working_tree = progress((ROOT / "README.md").read_text(encoding="utf-8"))
-    if not snapshots or working_tree != snapshots[-1][1]:
-        snapshots.append(("Working tree", working_tree))
+    if not committed_only:
+        working_tree = progress((ROOT / "README.md").read_text(encoding="utf-8"))
+        if not snapshots or working_tree != snapshots[-1][1]:
+            snapshots.append(("Working tree", working_tree))
     return snapshots
 
 
 def draw(snapshots, output):
-    revisions, rows = zip(*snapshots)
-    latest = rows[-1]
-    if not latest:
+    if not snapshots or not snapshots[-1][1]:
         raise SystemExit("No formalization progress rows in README.md")
+    latest = snapshots[-1][1]
+    baseline = dict.fromkeys(latest, (0, "", "🔴"))
+    revisions, rows = zip(("0% baseline", baseline), *snapshots)
 
-    figure, axes = plt.subplots(
-        len(latest), sharex=True, squeeze=False, figsize=(11.3, 2 + 0.66 * len(latest)), facecolor=PAPER
-    )
-    figure.subplots_adjust(left=0.34, right=0.96, bottom=0.13, top=0.80, hspace=0.60)
-    figure.text(0.04, 0.935, "Formalization progress", fontsize=25, weight="bold", color=INK)
-    figure.text(0.04, 0.88, "Recorded README percentages by commit · Each row targets 100%", fontsize=12, color=MUTED)
+    figure, axis = plt.subplots(figsize=(11.3, 5.9), facecolor=PAPER)
+    figure.subplots_adjust(left=0.085, right=0.695, bottom=0.14, top=0.73)
+    figure.text(0.04, 0.92, "Formalization progress", fontsize=25, weight="bold", color=INK)
+    figure.text(0.04, 0.86, "Recorded README percentages by commit · 100% is the target", fontsize=12, color=MUTED)
+    handles = [
+        Line2D([], [], color=color, marker=marker, linestyle="none", label=name)
+        for name, color, marker in STATUS_STYLES.values()
+    ]
+    figure.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.035, 0.835),
+                  frameon=False, ncols=4, fontsize=10, labelcolor=INK)
 
-    pending = revisions[-1] == "Working tree"
-    commit_count = len(revisions) - pending
-    for axis, (label, (latest_percent, latest_fraction)) in zip(axes.flat, latest.items()):
-        values = [snapshot.get(label, (math.nan, None))[0] for snapshot in rows]
-        axis.set_facecolor(PAPER)
-        axis.set_ylim(-9, 112)
-        axis.axhspan(0, 100, color="#f0f5ef", zorder=0)
-        axis.axhline(100, color="#94a99b", linestyle=(0, (3, 3)), linewidth=0.9)
-        axis.axhline(50, color="#dce7dd", linewidth=0.8)
-        axis.axhline(0, color="#dce7dd", linewidth=0.8)
-        axis.step(range(commit_count), values[:commit_count], where="post", color=GREEN, linewidth=1.8)
-        for i, value in enumerate(values[:commit_count]):
-            changed = i == 0 or rows[i].get(label) != rows[i - 1].get(label)
-            axis.scatter(i, value, s=28 if changed else 13, color=GREEN, zorder=3)
-        if pending:
-            if commit_count:
-                axis.step([commit_count - 1, commit_count], values[-2:], where="post",
-                          color=GREEN, linewidth=1.4, linestyle="--")
-            axis.scatter(commit_count, values[-1], s=30, facecolors=PAPER, edgecolors=GREEN, zorder=3)
+    axis.set_facecolor(PAPER)
+    axis.set_ylim(-7, 107)
+    axis.axhspan(0, 100, color="#f0f3f5", zorder=0)
+    axis.axhline(100, color="#9ba7ad", linestyle=(0, (3, 3)), linewidth=0.9)
+    for percent in (0, 25, 50, 75):
+        axis.axhline(percent, color="#dde3e7", linewidth=0.8)
 
-        axis.text(-0.48, 0.68, label, transform=axis.transAxes, color=INK, fontsize=12, weight="bold")
-        axis.text(-0.48, 0.27, f"{latest_percent}%  ({latest_fraction})", transform=axis.transAxes, color=GREEN, fontsize=11)
-        axis.set_yticks([0, 100], labels=["0%", "100%"])
-        axis.tick_params(axis="both", length=0, labelsize=9, colors=MUTED, pad=7)
-        axis.spines[:].set_visible(False)
+    for label in latest:
+        for i, (revision, snapshot) in enumerate(zip(revisions, rows)):
+            point = snapshot.get(label)
+            if point is None:
+                continue
+            percent, _, status = point
+            _, color, marker = STATUS_STYLES[status]
+            pending = revision == "Working tree"
+            previous = rows[i - 1].get(label) if i else None
+            if previous is not None:
+                previous_percent, _, previous_status = previous
+                style = "--" if pending else "-"
+                axis.plot([i - 1, i], [previous_percent, previous_percent], linestyle=style,
+                          color=STATUS_STYLES[previous_status][1], linewidth=1.8)
+                axis.plot([i, i], [previous_percent, percent], linestyle=style, color=color, linewidth=1.8)
+            axis.scatter(i, percent, s=25 if point != previous or pending else 14, marker=marker,
+                         facecolors=PAPER if pending else color, edgecolors=color, zorder=3)
 
     last = len(revisions) - 1
+    ordered = sorted(latest.items(), key=lambda item: item[1][0], reverse=True)
+    label_y = 107
+    for i, (label, (percent, _, status)) in enumerate(ordered):
+        # Keep labels readable when several traces end at the same percentage.
+        minimum = 7 * (len(ordered) - i - 1)
+        label_y = max(minimum, min(percent, label_y - 7))
+        _, color, _ = STATUS_STYLES[status]
+        axis.annotate(
+            f"{label} · {percent}%", xy=(last, percent), xytext=(1.05, label_y),
+            textcoords=axis.get_yaxis_transform(), va="center", color=color, fontsize=10,
+            arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65},
+        )
+
     stride = max(1, math.ceil(last / 9))
     ticks = [*range(0, last - stride + 1, stride), last]
-    axis = axes[-1, 0]
     axis.set_xlim(-0.15, len(revisions) - 0.85)
+    levels = [0, 25, 50, 75, 100]
+    axis.set_yticks(levels, labels=[f"{level}%" for level in levels])
     axis.set_xticks(ticks, labels=[revisions[i] for i in ticks])
+    axis.tick_params(axis="both", length=0, labelsize=9, colors=MUTED, pad=7)
+    axis.spines[:].set_visible(False)
     axis.set_xlabel("Git history · oldest to newest", color=MUTED, fontsize=10, labelpad=12)
     figure.savefig(output, dpi=150, metadata={"Software": "tools/plot_progress.py"})
     plt.close(figure)
 
 
 if __name__ == "__main__":
-    draw(history(), ROOT / "docs/progress.png")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--committed-only", action="store_true", help="exclude working-tree README values")
+    args = parser.parse_args()
+    draw(history(committed_only=args.committed_only), ROOT / "docs/progress.png")
