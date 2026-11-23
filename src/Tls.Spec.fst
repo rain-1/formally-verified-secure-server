@@ -75,6 +75,13 @@ let finished_key (secret:bytes{S.length secret = 32}) : b:bytes{S.length b = 32}
 let finished_verify (secret:bytes{S.length secret = 32}) (th:bytes{S.length th = 32}) : b:bytes{S.length b = 32} =
   hmac256 (finished_key secret) th
 
+(* Server CertificateVerify signature input with a SHA-256 transcript hash
+   (RFC 8446 section 4.4.3, RFC 9846 section 4.5.2). *)
+let server_cv_input (th:bytes{S.length th = 32}) : input:bytes{S.length input = 130} =
+  S.append (S.create 64 32uy)
+    (S.append (lit_bytes "TLS 1.3, server CertificateVerify")
+      (S.append (S.create 1 0uy) th))
+
 (* RFC 8446 section 5.3. The sequence number is already encoded big-endian. *)
 let nonce_byte (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8})
                (i:nat{i < 12}) : FStar.UInt.uint_t 8 =
