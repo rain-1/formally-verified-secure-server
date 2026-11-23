@@ -4,7 +4,7 @@
 
 ## Verification progress
 
-All 21 F\* modules pass verification. We specify a narrow protocol subset, check Low\* contracts with F\* and Z3, extract C with KaRaMeL, and compile with GCC. The guarantees depend on the specifications, toolchain, and C binding contracts. [Protocol subset](docs/POLICY.md) · [Proofs](docs/PROOFS.md) · [Trust assumptions](docs/TRUST.md)
+All 21 F\* modules pass verification. We check Low\* contracts with F\* and Z3, extract the HTTP and TLS core to C with KaRaMeL, and link it into a Rust executable. Rust owns sockets and buffers. The FFI wrapper checks lengths and controls which buffers reach the verified core. [Protocol subset](docs/POLICY.md) · [Proofs](docs/PROOFS.md) · [Trust assumptions](docs/TRUST.md)
 
 🔴 Started · 🟠 In progress · 🟢 Almost done · 🏁 Complete
 
@@ -14,11 +14,11 @@ Percentages count completed modules, test cases, or equally weighted roadmap mil
 |---|---|---|---|
 | Low\* memory safety | 🏁 **100%** (21/21 modules) | All core modules verified for bounds, lifetimes, and arithmetic safety under their contracts. | |
 | HTTP functional correctness | 🟠 **67%** (4/6 milestones) | Path normalization, lookup and routing, parser bounds, and header-budget rejection. | Specify and prove the header grammar and response serialization. |
-| TLS functional correctness | 🟠 **60%** (6/10 milestones) | Transcript operations, key derivation and installation, Finished verification, nonce and counter handling, padding removal, and application-data gating. Hash, KDF, and MAC proofs rely on HACL\* contracts. | Prove handshake message layouts and sequencing, CertificateVerify input construction, record protection, and end-to-end protocol security. |
+| TLS functional correctness | 🟠 **70%** (7/10 milestones) | Transcript operations, key derivation and installation, Finished verification, nonce and counter handling, padding removal, application-data gating, and CertificateVerify signing input construction. Hash, KDF, and MAC proofs rely on HACL\* contracts. | Prove handshake message layouts and sequencing, record protection, and end-to-end protocol security. |
 | ClientHello framing | 🟢 **80%** (4/5 milestones) | EverParse 3D verifies fixed fields, session ID bounds, suite and compression vector lengths, and extension TLV framing against the local grammar. | Verify the C glue’s exact-consumption check and expose that guarantee to F\*. |
 | Constant-time cryptography | 🟠 **50%** (2/4 milestones) | HACL\*, EverCrypt, and Vale supply primitives designed to avoid secret-dependent branches and memory accesses. Finished comparison scans every MAC byte. | Measure timing in the compiled server and analyze microarchitectural leakage. |
-| Current socket test suite | 🏁 **100%** (21/21 tests) | Routing, path confinement, malformed requests, the 100/101-header boundary, and both TLS suites pass. The matrix covers five optimization levels and an ASan/UBSan build. | |
-| C shell assurance | 🔴 **25%** (1/4 milestones) | Tested and hardened baseline. The binary relies on the compiler, Linux kernel, and hardware. | Specify and verify the socket loop, site loader, and sandbox policy. |
+| Current socket test suite | 🏁 **100%** (22/22 tests) | Routing, path confinement, malformed requests, TLS request fragmentation and pipelining, and both TLS suites pass. The matrix varies C optimization and runs a build with ASan/UBSan instrumentation in the C core. | |
+| Shell assurance | 🟠 **40%** (2/5 milestones) | Tested, sandboxed baseline and migration of socket, file, and buffer ownership to Rust. FFI and Linux syscall wrappers are trusted. | Specify and verify the socket loop, site loader, and sandbox policy. |
 
 In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inputs. ASan detects memory errors on exercised paths. UBSan checks selected undefined behavior, including signed overflow.
 
@@ -38,13 +38,15 @@ In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inpu
 | seccomp-BPF | Kill the process on unlisted syscalls, including file opens, new sockets, and exec. |
 | PIE + kernel ASLR | Randomize image placement to make reusable code and data addresses harder to predict. |
 | RELRO + eager binding | Make relocated linkage tables read-only after startup to impede redirection through overwritten entries. |
-| Non-executable stack, CET where enforced | Block execution from the stack and restrict some forms of control-flow hijacking. |
-| Stack canaries, stack-clash protection | Detect some stack overwrites and prevent large stack growth from jumping guard pages. |
-| FORTIFY, automatic zero initialization | Check selected library-call bounds and reduce disclosure of uninitialized stack data. |
+| Non-executable stack, CET on C code where enforced | Block execution from the stack and restrict some forms of control-flow hijacking. |
+| C stack canaries, stack-clash protection | Detect some stack overwrites and prevent large stack growth from jumping guard pages. |
+| C FORTIFY and automatic zero initialization | Check selected library-call bounds and reduce disclosure of uninitialized stack data. |
 | Static PIE | Eliminate dynamic-loader and shared-library lookup at startup. |
 | Optional systemd unit | Limit filesystem writes, capabilities, and socket families. Deny writable-executable mappings and cap memory and task exhaustion. |
 
 ## Build and check
+
+Requires Rust/Cargo and GCC on x86-64 Linux.
 
 ```sh
 scripts/setup-toolchain.sh

@@ -1,4 +1,5 @@
 _build/
+/shell/target/
 *.checked
 *.krml
 *.ok

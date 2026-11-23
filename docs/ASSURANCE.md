@@ -10,16 +10,15 @@
 | 3 Verified source | `src/*.fst` (Low*) | Path resolution and selected TLS functions refine written specifications. The Low* memory model covers all project F* modules. | **F\* + Z3 proofs** | See PROOFS.md for the scope of the TLS proofs and the interoperability tests. |
 | 4 Generated C | `_build/c/*.c` | Layer 3 | KaRaMeL's translation (trusted, widely used by HACL*/EverParse) | KaRaMeL bugs; we do not re-validate its output. |
 | 5 Crypto | `csrc/hacl` (HACL*, EverCrypt, Vale) | HACL*'s own F*/Vale proofs | published upstream proofs; our `assume val` contracts state only memory facts | We trust upstream proofs and our reading of their C API. |
-| 6 Shell | `shell/*.c` | nothing formal | small, reviewed, sanitizer-tested, sandboxed | Bugs here are unproved (but see §3). |
-| 7 Binary | `_build/server` | Layer 4/6 | gcc | Compiler bugs / UB-based miscompilation; not validated. |
+| 6 Shell | `shell/src/*.rs` | Rust types and Low* call contracts | Rust ownership, checked indexing, buffer validation, socket tests, sandbox | FFI and syscall safety depend on the unsafe wrappers. Shell functional correctness remains open. |
+| 7 Binary | `_build/server` | Layers 4 and 6 | GCC for C, rustc/LLVM for Rust | Translation correctness depends on both compilers. |
 | 8 Platform | Linux, glibc, CPU | — | — | Kernel/CPU bugs, side channels, Rowhammer. |
 
 ## 2. Guarantees: what you may reasonably expect, and what not
 
 **Reasonable to expect**
-- No memory-corruption bugs (overflow, UAF, OOB read/write) in the HTTP and TLS code: proved at the source level.
-  Combined with sanitizer fuzzing of the extracted C and the bounded buffers, a remote code-execution bug in
-  our code would require a bug in KaRaMeL/gcc/HACL*/the 500-line shell, not in the logic we wrote.
+- Source-level memory safety proofs cover the Low* HTTP and TLS core. Sanitizer fuzzing exercises the extracted C.
+  Rust owns the serving buffers and sockets. Memory safety at the C ABI and Linux boundaries depends on the unsafe wrappers.
 - A request cannot name content outside the in-memory site: proved at key level + structurally (no filesystem access while serving).
 - Malformed/hostile HTTP is rejected rather than interpreted (tested, not proved).
 - Standard primitives are HACL*'s verified implementations; secrets are handled by constant-time code.
@@ -30,7 +29,7 @@
   Handshake sequencing and validation rely on interoperability and negative tests.
 - Protection against DoS (slowloris is mitigated by timeouts/limits; floods are for `pf`/the network).
 - Side-channel freedom beyond constant-time primitives (no cache/branch-predictor/Spectre analysis of our code or gcc's output).
-- Correctness of compiled code beyond what gcc gives. No translation validation is done (see §4).
+- A proof that the compiled C and Rust match their source semantics (see §4).
 - Anything about the kernel, `sshd`, `pf`, certificates, DNS, or operations (key handling, renewal, config).
 
 ## 3. Mitigations on top of verification: yes, they help, and they are cheap
@@ -38,15 +37,14 @@
 Proofs remove classes of bugs *in the proved model*; mitigations bound the damage when the model is wrong (compiler bug,
 shell bug, wrong assumption in a binding contract, kernel interaction). They are independent layers, so they compose.
 
-Already in place (verified on the built binary: PIE, `RELRO`+`BIND_NOW`, non-exec stack, stack protector, `_FORTIFY_SOURCE`):
+The executable uses PIE, `RELRO` with eager binding, and a non-executable stack. The C build also enables stack canaries and `_FORTIFY_SOURCE`.
 - **ASLR** (kernel) + PIE: makes exploiting any residual memory bug need an info leak.
 - **no_new_privs, non-dumpable, no core files** (keys in memory).
-- **Landlock**: no filesystem access, no new TCP bind/connect after startup.
-- **seccomp allowlist** (~18 syscalls); anything else kills the process (no `execve`, `open`, `socket`, `ptrace`, ...).
-- **Site in memory**, no per-request filesystem access; optional `--user` privilege drop.
+- **Landlock** denies covered filesystem operations and, on network-capable kernels, new TCP binds and connects after startup.
+- **seccomp allowlist** kills the process on unlisted syscalls, including `execve`, `open`, `socket`, and `ptrace`.
+- **Site in memory** removes request-time filesystem access. Numeric `--uid` and `--gid` can drop privileges at startup.
 
-Also done: `-fcf-protection=full`, `-fstack-clash-protection`, `-ftrivial-auto-var-init=zero`, `_FORTIFY_SOURCE=3`, a fully static-PIE build
-(`make server-static`, no dynamic loader/NSS; privilege drop via numeric `--uid/--gid`), and `deploy/secure-web-server.service`
+The C build also enables `-fcf-protection=full`, `-fstack-clash-protection`, and `-ftrivial-auto-var-init=zero`. `make server-static` links a static PIE without a dynamic loader. The example unit in `deploy/secure-web-server.service` adds systemd confinement
 (systemd: capability bounding set, `ProtectSystem=strict`, `MemoryDenyWriteExecute`, `MemoryMax`, `TasksMax`, AF filtering).
 
 Still recommended: `pf` rate limits per source, a watchdog, and a separate privilege domain for the TLS private key
@@ -57,11 +55,7 @@ verified flight builder to request signatures over IPC.
 
 What exists and what it costs, honestly ranked by value for this project:
 
-1. **Differential/test-based (done):** `make test-matrix` runs the full end-to-end suite on builds at -O0/-O1/-O2/-O3/-Os and under ASan+UBSan
-   (all pass); `make fuzz` runs a 500k-iteration in-process fuzzer over `Http_Server_handle` and `Tls_Conn_input` (mutated requests/ClientHellos, random
-   keyed states) checking sanitizer cleanliness and the output invariants. Original description: run the extracted C under ASan/UBSan, fuzz it (done: 3.5k mutated
-   ClientHellos, raw HTTP suite), and compare behaviour across compilers/opt levels (gcc -O0/-O2/-O3, clang). Catches miscompilation
-   and UB-dependent behaviour empirically. Easy to extend with libFuzzer/AFL on `Http_Server_handle` and `Tls_Conn_input`.
+1. **Differential and sanitizer tests:** `make test-matrix` runs the full socket suite with the Rust shell while varying the C core's optimization from `-O0` to `-O3` and `-Os`. It also runs a build with ASan/UBSan instrumentation in the C core. `make fuzz` exercises `Http_Server_handle` and `Tls_Conn_input` in-process for 500,000 iterations by default, checking sanitizer cleanliness and output bounds.
 2. **Verified compiler (medium):** compile the extracted C with **CompCert** (proved semantics-preserving to assembly).
    HACL*/EverCrypt document this path; it removes gcc from the TCB for our code (not for the Vale assembly, which is
    verified separately). Costs: CompCert licensing for non-research use, slower code, and the shell must stay in its C subset.

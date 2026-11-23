@@ -52,6 +52,22 @@ check "openssl s_client + cert verify (AES-128-GCM)" \
 check "curl https 300 KB identical (default suites)" 'curl -s $T $S/big.bin | cmp - test/site/big.bin'
 check "curl https 300 KB identical (AES-128-GCM)"    'curl -s $T --tls13-ciphers TLS_AES_128_GCM_SHA256 $S/big.bin | cmp - test/site/big.bin'
 check "keep-alive reuses the TLS connection"  'curl -sv $T $S/ $S/style.css -o /dev/null -o /dev/null 2>&1 | grep -q "Re-using existing"'
+check "fragmented TLS request followed by a pipelined request" 'python3 - <<PY
+import socket
+import ssl
+
+context = ssl.create_default_context(cafile="test/tls/cert.pem")
+with context.wrap_socket(socket.create_connection(("127.0.0.1", 18443), timeout=3),
+                         server_hostname="localhost", suppress_ragged_eofs=False) as conn:
+    conn.sendall(b"GET / HTTP/1.1\r\nHost: local")
+    conn.sendall(b"host\r\n\r\nGET /style.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    reply = bytearray()
+    while chunk := conn.recv(4096):
+        reply.extend(chunk)
+    assert reply.count(b"HTTP/1.1 200 OK\r\n") == 2
+    assert b"<h1>hello</h1>\nHTTP/1.1 200 OK\r\n" in reply
+    assert reply.endswith(b"body{}\n")
+PY'
 check "ALPN http/1.1 selected"   'python3 -c "
 import ssl,socket
 c=ssl.create_default_context(cafile=\"test/tls/cert.pem\"); c.set_alpn_protocols([\"h2\",\"http/1.1\"])
