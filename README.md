@@ -24,6 +24,12 @@ In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inpu
 
 **Good places to start.** Pick one header rule and write its Low\* specification, strengthen the ClientHello glue contract, or add a reproducible timing test for the compiled Finished comparison. [HTTP parser](src/Http.Parse.fst) · [ClientHello binding](src/Tls.ChValid.fst) · [Finished comparison](src/Tls.Util.fst)
 
+### Formalization progress by commit
+
+![Seven formalization metrics tracked by commit on a 0–100% scale](docs/progress.png)
+
+The chart starts with the first commit that recorded these percentages. Filled markers show committed README values and hollow markers show the working tree. The Rust migration expanded the shell roadmap from four to five milestones. Regenerate with `python3 tools/plot_progress.py` using Matplotlib.
+
 ## Defense in depth
 
 | Defense | Intended effect |
