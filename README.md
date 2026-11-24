@@ -16,13 +16,13 @@ Percentages count completed modules, test cases, or equally weighted roadmap mil
 | HTTP functional correctness | 🟠 **67%** (4/6 milestones) | Path normalization, lookup and routing, parser bounds, and header-budget rejection. | Specify and prove the header grammar and response serialization. |
 | TLS functional correctness | 🟠 **70%** (7/10 milestones) | Transcript operations, key derivation and installation, Finished verification, nonce and counter handling, padding removal, application-data gating, and CertificateVerify signing input construction. Hash, KDF, and MAC proofs rely on HACL\* contracts. | Prove handshake message layouts and sequencing, record protection, and end-to-end protocol security. |
 | ClientHello framing | 🟢 **80%** (4/5 milestones) | EverParse 3D verifies fixed fields, session ID bounds, suite and compression vector lengths, and extension TLV framing against the local grammar. | Verify the C glue’s exact-consumption check and expose that guarantee to F\*. |
-| Constant-time cryptography | 🟠 **50%** (2/4 milestones) | HACL\*, EverCrypt, and Vale supply primitives designed to avoid secret-dependent branches and memory accesses. Finished comparison scans every MAC byte. | Measure timing in the compiled server and analyze microarchitectural leakage. |
+| Constant-time cryptography | 🟠 **75%** (3/4 milestones) | We use upstream constant-time primitives and scan every Finished MAC byte. Timing checks cover Finished rejection, authenticated record opening, and P-256 signing in GCC and Clang builds. Memcheck and disassembly cover selected branches and addresses. [Timing results](docs/ASSURANCE.md#constant-time-checks) | Study additional CPUs, build settings, TLS paths, and microarchitectural effects. |
 | Current socket test suite | 🏁 **100%** (22/22 tests) | Routing, path confinement, malformed requests, TLS request fragmentation and pipelining, and both TLS suites pass. The matrix varies C optimization and runs a build with ASan/UBSan instrumentation in the C core. | |
 | Shell assurance | 🟠 **40%** (2/5 milestones) | Tested, sandboxed baseline and migration of socket, file, and buffer ownership to Rust. FFI and Linux syscall wrappers are trusted. | Specify and verify the socket loop, site loader, and sandbox policy. |
 
 In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inputs. ASan detects memory errors on exercised paths. UBSan checks selected undefined behavior, including signed overflow.
 
-**Good places to start.** Pick one header rule and write its Low\* specification, strengthen the ClientHello glue contract, or add a reproducible timing test for the compiled Finished comparison. [HTTP parser](src/Http.Parse.fst) · [ClientHello binding](src/Tls.ChValid.fst) · [Finished comparison](src/Tls.Util.fst)
+**Good places to start.** Pick one header rule and write its Low\* specification, strengthen the ClientHello glue contract, or repeat the timing checks on another CPU. [HTTP parser](src/Http.Parse.fst) · [ClientHello binding](src/Tls.ChValid.fst) · [Timing checks](docs/ASSURANCE.md#constant-time-checks)
 
 ### Formalization progress by commit
 

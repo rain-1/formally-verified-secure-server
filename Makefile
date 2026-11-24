@@ -2,6 +2,8 @@
 #   make verify   verify all F* sources
 #   make c        extract verified code to C (_build/c)
 #   make server   build the server binary
+#   make timing   measure compiled TLS crypto paths
+#   make ct-trace check secret-derived branches and addresses with Memcheck
 E := $(CURDIR)/.toolchain/everparse/everparse
 FSTAR := $(E)/bin/fstar.exe
 KRML := $(E)/bin/krml
@@ -13,6 +15,8 @@ MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Tls.Util Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 FST_SOURCES := $(addprefix src/,$(addsuffix .fst,$(MODS)))
 CC ?= gcc
+OBJDUMP ?= objdump
+VALGRIND ?= valgrind
 LOCAL_RUST := $(CURDIR)/.toolchain/rust
 ifneq ($(wildcard $(LOCAL_RUST)/cargo/bin/cargo),)
 CARGO ?= env RUSTUP_HOME="$(LOCAL_RUST)/rustup" CARGO_HOME="$(LOCAL_RUST)/cargo" "$(LOCAL_RUST)/cargo/bin/cargo"
@@ -34,7 +38,7 @@ CORE_INCLUDE_DIRS := _build/c csrc/hacl csrc/krml csrc/everparse
 RUST_LINK := $(RUST_LIBS) $(addprefix -C link-arg=,$(LDFLAGS))
 export PATH := $(E)/bin:$(PATH)
 
-.PHONY: verify c native server server-static test-matrix fuzz clean
+.PHONY: verify c native server server-static test-matrix fuzz timing ct-trace clean
 verify:
 	@mkdir -p $(CACHE)
 	@for source in $(FST_SOURCES); do \
@@ -91,6 +95,28 @@ fuzz: c
 	$(CC) -std=gnu11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wno-parentheses $(addprefix -I,$(CORE_INCLUDE_DIRS)) \
 	  -o _build/fuzz test/fuzz_inproc.c $(CORE_SRC) -fsanitize=address,undefined
 	ASAN_OPTIONS=detect_leaks=0 _build/fuzz $(or $(ITERS),400000)
+
+timing: server
+	$(CC) -std=gnu11 -O2 -Wall -Wextra $(addprefix -I,$(CORE_INCLUDE_DIRS)) \
+	  -o _build/timing test/timing.c _build/native/libsws_core.a -lm
+	@$(OBJDUMP) -d --disassemble=Tls_Util_ct_eq "$(OUT)" > _build/timing-server.disasm
+	@$(OBJDUMP) -d --disassemble=Tls_Util_ct_eq _build/timing > _build/timing-harness.disasm
+	@for variant in server harness; do \
+	  awk -F '\t' '/^[[:space:]]*[[:xdigit:]]+:/ {gsub(/[[:space:]]/, "", $$2); print $$2}' \
+	    "_build/timing-$$variant.disasm" > "_build/timing-$$variant.bytes"; \
+	done
+	test -s _build/timing-server.bytes && cmp _build/timing-server.bytes _build/timing-harness.bytes
+	$(if $(TIMING_CPU),taskset -c $(TIMING_CPU)) _build/timing $(or $(SAMPLES),500000)
+
+ct-trace: native
+	$(CC) -std=gnu11 -O2 -g -Wall -Wextra $(addprefix -I,$(CORE_INCLUDE_DIRS)) \
+	  -o _build/ct-trace test/ct_trace.c _build/native/libsws_core.a
+	@status=0; $(VALGRIND) --tool=memcheck --quiet --error-exitcode=99 _build/ct-trace control \
+	  > _build/ct-trace-control.log 2>&1 || status=$$?; \
+	  if [ "$$status" -ne 99 ] || ! grep -q 'Conditional jump or move depends' _build/ct-trace-control.log; then \
+	    cat _build/ct-trace-control.log; exit 1; \
+	  fi
+	$(VALGRIND) --tool=memcheck --track-origins=yes --error-exitcode=99 _build/ct-trace
 
 clean:
 	rm -rf _build

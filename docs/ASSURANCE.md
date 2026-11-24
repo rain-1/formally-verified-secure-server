@@ -21,14 +21,14 @@
   Rust owns the serving buffers and sockets. Memory safety at the C ABI and Linux boundaries depends on the unsafe wrappers.
 - A request cannot name content outside the in-memory site: proved at key level + structurally (no filesystem access while serving).
 - Malformed/hostile HTTP is rejected rather than interpreted (tested, not proved).
-- Standard primitives are HACL*'s verified implementations; secrets are handled by constant-time code.
+- Standard primitives come from HACL*, EverCrypt, and Vale. Timing and branch/address checks cover selected compiled paths. [Constant-time checks](#constant-time-checks)
 - If something does go wrong in the process, the sandbox (§3) limits what an attacker can do.
 
 **Not to expect**
 - A protocol security theorem for TLS. The proofs cover memory safety, transcript buffer operations, and selected key schedule and Finished computations.
   Handshake sequencing and validation rely on interoperability and negative tests.
 - Protection against DoS (slowloris is mitigated by timeouts/limits; floods are for `pf`/the network).
-- Side-channel freedom beyond constant-time primitives (no cache/branch-predictor/Spectre analysis of our code or gcc's output).
+- Side-channel freedom for the whole server across CPUs, cache conditions, and compiler builds.
 - A proof that the compiled C and Rust match their source semantics (see §4).
 - Anything about the kernel, `sshd`, `pf`, certificates, DNS, or operations (key handling, renewal, config).
 
@@ -62,8 +62,7 @@ What exists and what it costs, honestly ranked by value for this project:
 3. **Translation validation / binary lifting (hard):** e.g. lift the binary (angr/BAP/Ghidra/Binsec) and prove equivalence to the
    C per function (CBMC/SeaHorn on C vs. SMT on lifted code; `llvm-tv`-style for LLVM). Feasible for small pure functions
    (`norm_key`, `scan_ok`), impractical for the whole server; value is mostly for the highest-risk functions.
-4. **Constant-time at binary level (medium):** `ctgrind`/Valgrind-based or `dudect` timing tests on the compiled crypto paths; Binsec/Rel or
-   `haybale-pitchfork` for formal checks. HACL*/Vale already do this for primitives; our own code does not branch on secrets.
+4. **Constant-time at binary level:** the timing and Memcheck targets exercise selected native paths from the server build. The comparator also has a machine-code review. See [Constant-time checks](#constant-time-checks).
 5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation have proofs against F* specifications built on HACL*'s
    `Spec.Agile.*`. EverParse validates ClientHello framing. Record protection, handshake sequencing, and the remaining parsers
    are candidates for further source-level proofs. RFC 8448 traces could independently check the extracted code.
@@ -75,3 +74,35 @@ Recommended order: 1 (extend now) -> 5 (biggest security payoff) -> 2 (if you wa
 Formal verification here gives strong guarantees about *a specific, small class of bugs in the code we wrote* (memory safety everywhere; path
 confinement functionally). Mitigations and sandboxing protect against what the proofs do not cover. Interop/fuzz tests cover protocol
 behaviour that is neither specified nor proved. Operational security (keys, certs, patching the kernel) is outside all of it.
+
+## Constant-time checks
+
+```sh
+make timing ct-trace CC=gcc TIMING_CPU=3 SAMPLES=1000000
+make timing ct-trace CC=clang OUT=_build/server-clang TIMING_CPU=3 SAMPLES=1000000
+```
+
+Choose an available logical CPU on an otherwise idle machine. The timing target uses x86-64 RDTSCP and GNU objdump. The trace target also needs Valgrind and its development headers. The tests use synthetic inputs in local processes.
+
+- **Hardware timing.** The harness links the server's native archive and checks that its comparator instruction bytes match the release executable. Randomly interleaved inputs exercise first versus last mismatch with warm and flushed cache lines, and fixed versus random operand bytes at one mismatch position. The Finished rejection samples cover key derivation, MAC comparison, and alert encryption for each supported suite. Both classes take the same rejection path. The record-opening samples vary the traffic key while holding the plaintext, record length, IV, and sequence number fixed. The timer covers authentication, decryption, and content-type extraction for a valid unpadded record. The harness checks every output against its fixture. P-256 samples vary a valid signing key or nonce while the other scalar stays fixed. [Welch t-test method](https://eprint.iacr.org/2016/1123) · [TLS 1.3 record protection](https://www.rfc-editor.org/rfc/rfc8446#section-5.2)
+- **Machine code.** In the GCC 14.2 `-O2` server, `Tls_Conn_check_cfin` compares the first five MAC bytes inline and calls `Tls_Util_ct_eq` for the rest. Clang 19.1.7 `-O2` inlines the full comparison using two fixed-width SIMD loads per operand. Both builds combine differences with XOR and OR and branch on the match bit after processing all 32 bytes. The standalone comparator also uses public offsets and loop bounds in both builds.
+- **Executed branches and addresses.** Memcheck tags synthetic secrets and checks their use in conditional control flow and addressing. It covers HKDF-Expand and HMAC, the Finished comparator, X25519, P-256 signing, and encryption with ChaCha20-Poly1305 and AES-128-GCM when supported. The harness declassifies the return statuses after the calls. The tainted positive control must produce a conditional-branch report. [Memcheck V bits](https://valgrind.org/docs/manual/mc-manual.html#mc-manual.machine) · [ctgrind method](https://github.com/agl/ctgrind)
+
+**Recorded results.** Both builds used `-O2` on logical CPU 3 of an AMD Ryzen 5 7600X running Linux 6.12.117. Each build used one million measurements per comparison, Finished rejection, or record-opening experiment and 100,000 per signing experiment. Memcheck used Valgrind 3.24.0.
+
+| Experiment | Welch t, GCC 14.2 | Welch t, Clang 19.1.7 |
+|---|---:|---:|
+| Early-exit control | -2300.740 | -1419.777 |
+| First vs. last mismatch, warm | +1.205 | -1.419 |
+| Fixed vs. random operands, warm | -1.000 | -1.079 |
+| First vs. last mismatch, flushed | -0.251 | -0.646 |
+| Finished rejection, ChaCha20 | +0.486 | +2.132 |
+| Finished rejection, AES-GCM | -0.556 | +0.977 |
+| Record opening, ChaCha20 | +1.690 | -1.002 |
+| Record opening, AES-GCM | +2.410 | +1.114 |
+| P-256 signing, fixed vs. random key | -0.238 | +0.563 |
+| P-256 signing, fixed vs. random nonce | -0.221 | -0.208 |
+
+Both controls crossed the screening threshold of `|t| = 5`. The largest measured `|t|` among server paths was 2.410. Memcheck reported zero errors in the selected crypto traces and reported the tainted control branch on both builds.
+
+Open coverage includes taint analysis of record opening, TLS signing through DER serialization, other CPU models and compiler flags, transient execution, shared-core contention, and power or frequency leakage. The timing results cover the specified fixtures on one CPU model. [Frequency-dependent timing](https://www.hertzbleed.com/hertzbleed.pdf)
