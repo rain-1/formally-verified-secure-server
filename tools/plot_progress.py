@@ -124,7 +124,7 @@ def draw(snapshots, output):
         axis.annotate(
             f"{label} · {percent}%", xy=(last, percent), xytext=(1.05, label_y),
             textcoords=axis.get_yaxis_transform(), va="center", color=color, fontsize=10,
-            arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65},
+            arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65, "relpos": (0, 0.5)},
         )
 
     stride = max(1, math.ceil(last / 9))
