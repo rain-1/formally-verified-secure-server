@@ -269,7 +269,8 @@ int main(int argc, char **argv)
     bool flush = __get_cpuid(1, &a, &b, &c, &d) && (d & (1U << 19));
     EverCrypt_AutoConfig2_init();
     bool aes = EverCrypt_AutoConfig2_has_aesni() && EverCrypt_AutoConfig2_has_pclmulqdq()
-        && EverCrypt_AutoConfig2_has_sse();
+        && EverCrypt_AutoConfig2_has_sse() && EverCrypt_AutoConfig2_has_avx()
+        && EverCrypt_AutoConfig2_has_movbe();
 
     puts("Experiment                    Class 0 / Class 1          TSC ticks/call       Welch t");
     double control = compare("early-exit control", early_exit, POSITION_WARM, samples);

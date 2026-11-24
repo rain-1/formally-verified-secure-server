@@ -63,9 +63,7 @@ What exists and what it costs, honestly ranked by value for this project:
    C per function (CBMC/SeaHorn on C vs. SMT on lifted code; `llvm-tv`-style for LLVM). Feasible for small pure functions
    (`norm_key`, `scan_ok`), impractical for the whole server; value is mostly for the highest-risk functions.
 4. **Constant-time at binary level:** the timing and Memcheck targets exercise selected native paths from the server build. The comparator also has a machine-code review. See [Constant-time checks](#constant-time-checks).
-5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation have proofs against F* specifications built on HACL*'s
-   `Spec.Agile.*`. EverParse validates ClientHello framing. Record protection, handshake sequencing, and the remaining parsers
-   are candidates for further source-level proofs. RFC 8448 traces could independently check the extracted code.
+5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation use HACL*'s F* specifications. The record proofs cover the TLS framing and AEAD integration. ChaCha20-Poly1305 has a concrete model and the AES-GCM contract is abstract. EverParse validates ClientHello framing. Handshake sequencing and the remaining parsers still need proofs. RFC 8448 traces could independently check the extracted code.
 
 Recommended order: 1 (extend now) -> 5 (biggest security payoff) -> 2 (if you want gcc out of the TCB) -> 3/4 selectively.
 

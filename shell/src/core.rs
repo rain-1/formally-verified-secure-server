@@ -46,6 +46,8 @@ extern "C" {
     fn EverCrypt_AutoConfig2_has_aesni() -> bool;
     fn EverCrypt_AutoConfig2_has_pclmulqdq() -> bool;
     fn EverCrypt_AutoConfig2_has_sse() -> bool;
+    fn EverCrypt_AutoConfig2_has_avx() -> bool;
+    fn EverCrypt_AutoConfig2_has_movbe() -> bool;
     fn Lib_Memzero0_memzero0(dst: *mut u8, len: u64);
 }
 
@@ -140,12 +142,14 @@ impl Credentials {
             ));
         }
         static AES_OK: OnceLock<bool> = OnceLock::new();
-        // Initialize CPU dispatch once before the first credential can be used.
+        // Match the feature check in EverCrypt's one-shot AES-GCM entry points.
         let aes_ok = *AES_OK.get_or_init(|| unsafe {
             EverCrypt_AutoConfig2_init();
             EverCrypt_AutoConfig2_has_aesni()
                 && EverCrypt_AutoConfig2_has_pclmulqdq()
                 && EverCrypt_AutoConfig2_has_sse()
+                && EverCrypt_AutoConfig2_has_avx()
+                && EverCrypt_AutoConfig2_has_movbe()
         });
         Ok(Self { chain, key, aes_ok })
     }
@@ -259,7 +263,7 @@ impl TlsState {
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "TLS sequence exhausted",
+                "TLS record encryption failed or sequence exhausted",
             ));
         }
         if n != plain.len() + 22 {

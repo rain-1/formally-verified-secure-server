@@ -49,20 +49,57 @@ let fatal st desc out res consumed =
   set_res res consumed n 0ul 1ul
 
 (* decrypt the record at inp (header 5 bytes + rlen body) with the client keys.
-   0xFFFFFFFF = authentication failure, 0xFFFFFFFE = malformed; else content length (type in ty[0]) *)
+   0xFFFFFFFF = open rejected, 0xFFFFFFFE = malformed; else content length (type in ty[0]) *)
+let incoming_plaintext (h:HS.mem) (st:stb) (inp:Spec.bytes)
+    (rlen:nat{rlen >= 17 /\ rlen <= 16640 /\ 5 + rlen <= S.length inp})
+  : GTot (option (p:Spec.bytes{S.length p = rlen - 16})) =
+  decrypt_record (S.index (B.as_seq h st) (U32.v o_suite)) (state_slice h st (U32.v o_ckey) 32)
+    (state_slice h st (U32.v o_civ) 12) (state_slice h st (U32.v o_cseq) 8)
+    (S.slice inp 0 5) (S.slice inp 5 (5 + rlen))
+
+private val record_content_type : inner:ibuf -> il:U32.t{U32.v il <= B.length inner /\ U32.v il <= 16640}
+  -> ty:ibuf{B.length ty = 1}
+  -> Stack U32.t
+     (requires fun h -> B.live h inner /\ B.live h ty /\ B.disjoint inner ty)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer ty) h0 h1 /\
+        (r == 4294967294ul ==>
+           (forall (j:nat). j < U32.v il ==> S.index (B.as_seq h0 inner) j == 0uy)) /\
+        (r <> 4294967294ul ==> U32.v r < U32.v il /\
+           S.index (B.as_seq h1 ty) 0 == S.index (B.as_seq h0 inner) (U32.v r) /\
+           S.index (B.as_seq h1 ty) 0 <> 0uy /\
+           (forall (j:nat). U32.v r < j /\ j < U32.v il ==> S.index (B.as_seq h0 inner) j == 0uy)))
+let record_content_type inner il ty =
+  let innerb = B.sub inner 0ul il in
+  let li = last_nz innerb il il in
+  if li = il then 4294967294ul
+  else begin
+    let t = B.index innerb li in
+    B.upd ty 0ul t;
+    li
+  end
+
 val open_rec : st:stb -> inp:ibuf -> rlen:U32.t{U32.v rlen >= 17 /\ U32.v rlen <= 16640 /\ 5 + U32.v rlen <= B.length inp}
   -> inner:ibuf{B.length inner = 16640} -> ty:ibuf{B.length ty = 1}
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h inp /\ B.live h inner /\ B.live h ty /\ B.disjoint st inp /\ B.disjoint st inner /\ B.disjoint st ty /\ B.disjoint inp inner /\ B.disjoint inp ty /\ B.disjoint inner ty)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer inner)) (B.loc_buffer ty)) h0 h1 /\
         phase_at h1 st == phase_at h0 st /\
-        (U32.v r = 4294967295 \/ U32.v r = 4294967294 \/
-         (U32.v r < U32.v rlen - 16 /\
-          S.index (B.as_seq h1 ty) 0 == S.index (B.as_seq h1 inner) (U32.v r) /\
-          S.index (B.as_seq h1 ty) 0 <> 0uy /\
-          (forall (j:nat). U32.v r < j /\ j < U32.v rlen - 16 ==>
-             S.index (B.as_seq h1 inner) j == 0uy))))
+        (r == 4294967295ul ==> B.as_seq h1 st == B.as_seq h0 st) /\
+        (r <> 4294967295ul ==>
+           incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) ==
+             Some (S.slice (B.as_seq h1 inner) 0 (U32.v rlen - 16)) /\
+           incremented_prefix (state_slice h0 st (U32.v o_cseq) 8) (state_slice h1 st (U32.v o_cseq) 8) 8) /\
+        (r == 4294967294ul ==>
+           (forall (j:nat). j < U32.v rlen - 16 ==> S.index (B.as_seq h1 inner) j == 0uy)) /\
+        (r <> 4294967295ul /\ r <> 4294967294ul ==>
+           U32.v r < U32.v rlen - 16 /\
+           S.index (B.as_seq h1 ty) 0 == S.index (B.as_seq h1 inner) (U32.v r) /\
+           S.index (B.as_seq h1 ty) 0 <> 0uy /\
+           (forall (j:nat). U32.v r < j /\ j < U32.v rlen - 16 ==>
+              S.index (B.as_seq h1 inner) j == 0uy)))
+#push-options "--split_queries always --z3rlimit 150"
 let open_rec st inp rlen inner ty =
+  let h0 = get () in
   push_frame ();
   let key = B.alloca 0uy 32ul in
   let iv = B.alloca 0uy 12ul in
@@ -75,29 +112,44 @@ let open_rec st inp rlen inner ty =
   let il = U32.sub rlen 16ul in
   let innerb = B.sub inner 0ul il in
   let okseq = seq_ok seq in
-  let r =
-    if not okseq then 4294967295ul
+  let opened =
+    if not okseq then false
     else begin
       let suite = B.index st o_suite in
       let d = unseal key iv seq hdr body rlen innerb suite in
-      if d <> 0ul then 4294967295ul
+      let hd = get () in
+      assert (B.as_seq hd st == B.as_seq h0 st);
+      if d <> 0ul then false
       else begin
-        let before = get () in
+        assert (incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) == Some (B.as_seq hd innerb));
+        assert (incremented_prefix (state_slice h0 st (U32.v o_cseq) 8) (B.as_seq hd seq) 8);
         B.blit seq 0ul st o_cseq 8ul;
         let after = get () in
-        S.lemma_index_slice (B.as_seq before st) 0 (U32.v o_cseq) (U32.v o_phase);
+        S.lemma_index_slice (B.as_seq hd st) 0 (U32.v o_cseq) (U32.v o_phase);
         S.lemma_index_slice (B.as_seq after st) 0 (U32.v o_cseq) (U32.v o_phase);
-        let li = last_nz innerb il il in
-        if li = il then 4294967294ul
-        else begin
-          let t = B.index innerb li in
-          B.upd ty 0ul t;
-          li
-        end
+        assert (state_slice after st (U32.v o_cseq) 8 == B.as_seq hd seq);
+        assert (B.as_seq after innerb == B.as_seq hd innerb);
+        true
       end
     end in
+  let before_pop = get () in
+  assert (opened == false ==> B.as_seq before_pop st == B.as_seq h0 st);
+  assert (opened == true ==> incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) ==
+    Some (S.slice (B.as_seq before_pop inner) 0 (U32.v il)));
+  assert (opened == true ==>
+    incremented_prefix (state_slice h0 st (U32.v o_cseq) 8) (state_slice before_pop st (U32.v o_cseq) 8) 8);
   pop_frame ();
-  r
+  let hf = get () in
+  assert (B.as_seq hf st == B.as_seq before_pop st /\ B.as_seq hf inner == B.as_seq before_pop inner /\
+    B.as_seq hf ty == B.as_seq before_pop ty);
+  if opened then begin
+    let r = record_content_type inner il ty in
+    let ht = get () in
+    assert (B.as_seq ht inner == B.as_seq hf inner /\ B.as_seq ht st == B.as_seq hf st);
+    assert (r <> 4294967295ul);
+    r
+  end else 4294967295ul
+#pop-options
 
 val run_ch : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}

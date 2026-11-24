@@ -107,14 +107,26 @@ let tr_hash st tr out =
 unfold let phase_at (h:HS.mem) (st:stb) : GTot U8.t =
   S.index (B.as_seq h st) (U32.v o_phase)
 
-(* protect+emit one record with the server's current write keys. Returns 0 if seq exhausted. *)
+let state_slice (h:HS.mem) (st:stb) (pos:nat) (len:nat{pos + len <= 512})
+  : GTot (r:Spec.bytes{S.length r = len}) = S.slice (B.as_seq h st) pos (pos + len)
+
+(* Protect and emit one record with the server's write keys. A zero result
+   indicates sequence exhaustion or an encryption error. *)
 val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.length plain /\ U32.v plen <= 16384}
   -> out:ibuf{B.length out >= U32.v plen + 22}
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h plain /\ B.live h out /\
         B.disjoint st plain /\ B.disjoint st out /\ B.disjoint plain out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\
-        (U32.v r = 0 \/ U32.v r = U32.v plen + 22) /\ phase_at h1 st == phase_at h0 st)
+        phase_at h1 st == phase_at h0 st /\
+        (if r = 0ul then B.as_seq h1 st == B.as_seq h0 st
+         else U32.v r = U32.v plen + 22 /\
+           incremented_prefix (state_slice h0 st (U32.v o_sseq) 8) (state_slice h1 st (U32.v o_sseq) 8) 8 /\
+           S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+             Spec.sealed_record (S.index (B.as_seq h0 st) (U32.v o_suite))
+               (state_slice h0 st (U32.v o_skey) 32) (state_slice h0 st (U32.v o_siv) 12)
+               (state_slice h0 st (U32.v o_sseq) 8) ctype (B.as_seq h0 plain)))
+#push-options "--split_queries always --z3rlimit 100"
 let send_rec st ctype plain plen out =
   push_frame ();
   let key = B.alloca 0uy 32ul in
@@ -128,15 +140,18 @@ let send_rec st ctype plain plen out =
     if ok then begin
       let suite = B.index st o_suite in
       let n = seal key iv seq ctype plain plen out suite in
-      let before = get () in
-      B.blit seq 0ul st o_sseq 8ul;
-      let after = get () in
-      S.lemma_index_slice (B.as_seq before st) 0 (U32.v o_sseq) (U32.v o_phase);
-      S.lemma_index_slice (B.as_seq after st) 0 (U32.v o_sseq) (U32.v o_phase);
+      if n <> 0ul then begin
+        let before = get () in
+        B.blit seq 0ul st o_sseq 8ul;
+        let after = get () in
+        S.lemma_index_slice (B.as_seq before st) 0 (U32.v o_sseq) (U32.v o_phase);
+        S.lemma_index_slice (B.as_seq after st) 0 (U32.v o_sseq) (U32.v o_phase)
+      end;
       n
     end else 0ul in
   pop_frame ();
   r
+#pop-options
 
 (* alert: plaintext before any keys exist, protected afterwards. Returns bytes written to out (>= 24 capacity). *)
 val send_alert : st:stb -> level:U8.t -> desc:U8.t -> out:ibuf{B.length out >= 24}

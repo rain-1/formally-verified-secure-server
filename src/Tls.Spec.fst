@@ -12,8 +12,10 @@ module LI = Lib.IntTypes
 module RI = Lib.RawIntTypes
 module HD = Spec.Hash.Definitions
 
-noextract let lift (b:bytes) : S.seq LI.uint8 = S.init (S.length b) (fun i -> RI.u8_from_UInt8 (S.index b i))
-noextract let unlift (b:S.seq LI.uint8) : bytes = S.init (S.length b) (fun i -> RI.u8_to_UInt8 (S.index b i))
+noextract let lift (b:bytes) : r:S.seq LI.uint8{S.length r = S.length b} =
+  S.init (S.length b) (fun i -> RI.u8_from_UInt8 (S.index b i))
+noextract let unlift (b:S.seq LI.uint8) : r:bytes{S.length r = S.length b} =
+  S.init (S.length b) (fun i -> RI.u8_to_UInt8 (S.index b i))
 
 let max_in : nat = 65536
 noextract let bounds_ok () : Lemma (pow2 61 > 200000 /\ pow2 32 > 200000) = assert_norm (pow2 61 > 200000); assert_norm (pow2 32 > 200000)
@@ -87,3 +89,60 @@ let nonce_byte (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8})
                (i:nat{i < 12}) : FStar.UInt.uint_t 8 =
   FStar.UInt.logxor #8 (U8.v (S.index iv i))
     (if i < 4 then 0 else U8.v (S.index seq (i - 4)))
+
+let record_nonce (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8}) : r:bytes{S.length r = 12} =
+  S.init 12 (fun i -> U8.uint_to_t (nonce_byte iv seq i))
+
+(* RFC 8446 section 5.2, with zero sender-supplied padding. ChaCha20 uses
+   HACL*'s specification. The AES-GCM operations are abstract. *)
+type record_alg = | Aes128Gcm | ChaCha20Poly1305
+
+let record_alg_for (suite:U8.t) : record_alg =
+  if suite = 1uy then Aes128Gcm else ChaCha20Poly1305
+
+let record_key_len (alg:record_alg) : nat = if alg = Aes128Gcm then 16 else 32
+
+let record_key (suite:U8.t) (key:bytes{S.length key = 32})
+  : r:bytes{S.length r = record_key_len (record_alg_for suite)} =
+  if suite = 1uy then S.slice key 0 16 else key
+
+let record_header (body_len:nat{body_len < 65536}) : h:bytes{S.length h = 5} =
+  S.append (S.append (S.create 1 23uy) (u16_be 771)) (u16_be body_len)
+
+assume val aes128gcm_encrypt : bytes -> bytes -> bytes -> p:bytes ->
+  c:bytes{S.length c = S.length p + 16}
+assume val aes128gcm_decrypt : bytes -> bytes -> bytes -> c:bytes{S.length c >= 16} ->
+  option (p:bytes{S.length p = S.length c - 16})
+
+[@@"opaque_to_smt"]
+noextract let record_encrypt (alg:record_alg) (key:bytes{S.length key = record_key_len alg})
+    (nonce:bytes{S.length nonce = 12}) (aad:bytes{S.length aad = 5})
+    (plain:bytes{S.length plain <= 16640}) : c:bytes{S.length c = S.length plain + 16} =
+  match alg with
+  | Aes128Gcm -> aes128gcm_encrypt key nonce aad plain
+  | ChaCha20Poly1305 ->
+    assert_norm (LI.max_size_t > 16640 /\ LI.maxint LI.U64 > 5);
+    unlift (Spec.Chacha20Poly1305.aead_encrypt (lift key) (lift nonce) (lift plain) (lift aad))
+
+[@@"opaque_to_smt"]
+noextract let record_decrypt (alg:record_alg) (key:bytes{S.length key = record_key_len alg})
+    (nonce:bytes{S.length nonce = 12}) (aad:bytes{S.length aad = 5})
+    (c:bytes{16 <= S.length c /\ S.length c <= 16640}) :
+  option (p:bytes{S.length p = S.length c - 16})
+  = match alg with
+    | Aes128Gcm -> aes128gcm_decrypt key nonce aad c
+    | ChaCha20Poly1305 ->
+      assert_norm (LI.max_size_t > 16640 /\ LI.maxint LI.U64 > 5);
+      let pos = S.length c - 16 in
+      match Spec.Chacha20Poly1305.aead_decrypt (lift key) (lift nonce)
+          (lift (S.slice c 0 pos)) (lift (S.slice c pos (S.length c))) (lift aad) with
+      | Some p -> Some (unlift p)
+      | None -> None
+
+let sealed_record (suite:U8.t) (key:bytes{S.length key = 32})
+    (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8})
+    (ctype:U8.t) (plain:bytes{S.length plain <= 16384}) : bytes =
+  let hdr = record_header (S.length plain + 17) in
+  let inner = S.append plain (S.create 1 ctype) in
+  S.append hdr (record_encrypt (record_alg_for suite) (record_key suite key)
+    (record_nonce iv seq) hdr inner)

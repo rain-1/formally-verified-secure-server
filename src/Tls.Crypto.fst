@@ -199,8 +199,21 @@ let seq_ok seq =
 inline_for_extraction let max_plain : U32.t = 16384ul
 inline_for_extraction let inner_cap : U32.t = 16400ul
 
-(* Encrypt [plain||ctype] into a TLS record at out. Returns record length = plen+22.
-   Caller must have checked seq_ok. *)
+let record_nonce_eq (old:Spec.bytes{S.length old = 12}) (out:Spec.bytes{S.length out = 12})
+    (iv:Spec.bytes{S.length iv = 12}) (seq:Spec.bytes{S.length seq = 8})
+  : Lemma (requires nonce_suffix old out iv seq 0)
+          (ensures out == Spec.record_nonce iv seq) =
+  reveal_opaque (`%nonce_suffix) (nonce_suffix old out iv seq 0);
+  S.lemma_eq_intro out (Spec.record_nonce iv seq)
+
+let record_slices (b:Spec.bytes) (ilen:nat{ilen + 21 <= S.length b})
+  : Lemma (S.slice b 0 (ilen + 21) ==
+      S.append (S.slice b 0 5) (S.append (S.slice b 5 (5 + ilen)) (S.slice b (5 + ilen) (ilen + 21)))) =
+  S.lemma_eq_intro (S.slice b 0 (ilen + 21))
+    (S.append (S.slice b 0 5) (S.append (S.slice b 5 (5 + ilen)) (S.slice b (5 + ilen) (ilen + 21))))
+
+(* Encrypt [plain||ctype]. A zero result means the AEAD backend failed, and
+   the output must be discarded. Caller checks seq_ok before sealing. *)
 val seal : key:ibuf{B.length key = 32} -> iv:ibuf{B.length iv = 12} -> seq:ibuf{B.length seq = 8}
   -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.length plain /\ U32.v plen <= 16384}
   -> out:ibuf{B.length out >= U32.v plen + 22} -> suite:U8.t
@@ -209,57 +222,131 @@ val seal : key:ibuf{B.length key = 32} -> iv:ibuf{B.length iv = 12} -> seq:ibuf{
         B.disjoint out key /\ B.disjoint out iv /\ B.disjoint out seq /\ B.disjoint out plain /\
         B.disjoint seq key /\ B.disjoint seq iv)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer seq)) h0 h1 /\
-        U32.v r = U32.v plen + 22)
+        (if r = 0ul then B.as_seq h1 seq == B.as_seq h0 seq
+         else U32.v r = U32.v plen + 22 /\
+           incremented_prefix (B.as_seq h0 seq) (B.as_seq h1 seq) 8 /\
+           S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+             Spec.sealed_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq) ctype (B.as_seq h0 plain)))
+#push-options "--split_queries always --z3rlimit 85"
 let seal key iv seq ctype plain plen out suite =
+  let h0 = get () in
   push_frame ();
   let inner = B.alloca 0uy inner_cap in
   let nonce = B.alloca 0uy 12ul in
-  let il = U32.add plen 1ul in
-  B.blit plain 0ul inner 0ul plen;
-  B.upd inner plen ctype;
+  let hb = get () in
+  assert (B.as_seq hb plain == B.as_seq h0 plain);
+  let p = put_buf inner 0ul plain plen in
+  let il = put_u8 inner p ctype in
   let ilen = B.sub inner 0ul il in
+  let hi = get () in
+  assert (S.slice (B.as_seq hi inner) 0 (U32.v plen) == B.as_seq h0 plain);
+  assert (S.slice (B.as_seq hi inner) (U32.v plen) (U32.v il) == S.create 1 ctype);
+  S.lemma_eq_intro (B.as_seq hi ilen) (S.append (B.as_seq h0 plain) (S.create 1 ctype));
   let clen = U32.add il 16ul in
   let p = put_u8 out 0ul 23uy in
   let p = put_u16 out p 771ul in
+  let hpre = get () in
+  S.lemma_eq_intro (S.slice (B.as_seq hpre out) 0 3)
+    (S.append (S.create 1 23uy) (Spec.u16_be 771));
   let p = put_u16 out p clen in
-  make_nonce nonce iv seq 0ul;
   let aad = B.sub out 0ul 5ul in
+  let hn = get () in
+  S.lemma_eq_intro (B.as_seq hn aad) (Spec.record_header (U32.v clen));
+  make_nonce nonce iv seq 0ul;
+  let h = get () in
+  record_nonce_eq (B.as_seq hn nonce) (B.as_seq h nonce) (B.as_seq h0 iv) (B.as_seq h0 seq);
   let o = B.sub out 5ul il in
   let tag = B.sub out (U32.add 5ul il) 16ul in
-  if suite = 1uy then begin
-    let k16 = B.sub key 0ul 16ul in
-    let _ = EverCrypt.AEAD.encrypt_expand_aes128_gcm k16 nonce 12ul aad 5ul ilen il o tag in ()
-  end else Hacl.AEAD_Chacha20Poly1305.encrypt o tag ilen il aad 5ul key nonce;
-  inc_seq seq 8ul;
+  assert (B.as_seq h ilen == S.append (B.as_seq h0 plain) (S.create 1 ctype));
+  assert (B.as_seq h aad == Spec.record_header (U32.v clen));
+  let ok =
+    if suite = 1uy then begin
+      let k16 = B.sub key 0ul 16ul in
+      let e = EverCrypt.AEAD.encrypt_expand_aes128_gcm k16 nonce 12ul aad 5ul ilen il o tag in
+      e = 0uy
+    end else begin
+      Hacl.AEAD_Chacha20Poly1305.encrypt o tag ilen il aad 5ul key nonce;
+      true
+    end in
+  let he = get () in
+  let result = if ok then begin
+    assert (B.as_seq he aad == B.as_seq h aad);
+    record_slices (B.as_seq he out) (U32.v il);
+    assert (S.slice (B.as_seq he out) 0 (U32.v plen + 22) ==
+      Spec.sealed_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq) ctype (B.as_seq h0 plain));
+    inc_seq seq 8ul;
+    U32.add plen 22ul
+  end else 0ul in
   pop_frame ();
-  U32.add plen 22ul
+  result
+#pop-options
+
+let decrypt_record (suite:U8.t) (key:Spec.bytes{S.length key = 32})
+    (iv:Spec.bytes{S.length iv = 12}) (seq:Spec.bytes{S.length seq = 8})
+    (hdr:Spec.bytes{S.length hdr = 5}) (body:Spec.bytes{16 <= S.length body /\ S.length body <= 16640}) =
+  Spec.record_decrypt (Spec.record_alg_for suite) (Spec.record_key suite key)
+    (Spec.record_nonce iv seq) hdr body
 
 (* Decrypt record body (ciphertext||tag, n bytes, n>=17) with AAD hdr (5 bytes).
    inner receives n-16 bytes. Returns 0 on success. Caller checks seq_ok; seq advances on success. *)
 val unseal : key:ibuf{B.length key = 32} -> iv:ibuf{B.length iv = 12} -> seq:ibuf{B.length seq = 8}
-  -> hdr:ibuf{B.length hdr = 5} -> body:ibuf -> n:U32.t{U32.v n = B.length body /\ U32.v n >= 17}
+  -> hdr:ibuf{B.length hdr = 5} -> body:ibuf -> n:U32.t{U32.v n = B.length body /\ 17 <= U32.v n /\ U32.v n <= 16640}
   -> inner:ibuf{B.length inner = U32.v n - 16} -> suite:U8.t
   -> Stack U32.t
      (requires fun h -> B.live h key /\ B.live h iv /\ B.live h seq /\ B.live h hdr /\ B.live h body /\
         B.live h inner /\ B.disjoint inner key /\ B.disjoint inner iv /\ B.disjoint inner seq /\
-        B.disjoint inner hdr /\ B.disjoint inner body /\ B.disjoint seq key /\ B.disjoint seq iv)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer inner) (B.loc_buffer seq)) h0 h1)
+        B.disjoint inner hdr /\ B.disjoint inner body /\ B.disjoint seq key /\ B.disjoint seq iv /\
+        B.disjoint seq hdr /\ B.disjoint seq body)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer inner) (B.loc_buffer seq)) h0 h1 /\
+        (if r = 0ul then
+           decrypt_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq)
+             (B.as_seq h0 hdr) (B.as_seq h0 body) == Some (B.as_seq h1 inner) /\
+           incremented_prefix (B.as_seq h0 seq) (B.as_seq h1 seq) 8
+         else r == 1ul /\ B.as_seq h1 seq == B.as_seq h0 seq /\
+           (suite <> 1uy ==> decrypt_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq)
+             (B.as_seq h0 hdr) (B.as_seq h0 body) == None)))
+#push-options "--split_queries always --z3rlimit 85"
 let unseal key iv seq hdr body n inner suite =
+  let h0 = get () in
   push_frame ();
   let nonce = B.alloca 0uy 12ul in
+  let hn = get () in
   make_nonce nonce iv seq 0ul;
+  let h = get () in
+  record_nonce_eq (B.as_seq hn nonce) (B.as_seq h nonce) (B.as_seq h0 iv) (B.as_seq h0 seq);
   let ctl = U32.sub n 16ul in
   let ct = B.sub body 0ul ctl in
   let tag = B.sub body ctl 16ul in
+  S.lemma_split (B.as_seq h0 body) (U32.v ctl);
+  assert (S.append (B.as_seq h ct) (B.as_seq h tag) == B.as_seq h0 body);
   let r =
     if suite = 1uy then begin
       let k16 = B.sub key 0ul 16ul in
       let e = EverCrypt.AEAD.decrypt_expand_aes128_gcm k16 nonce 12ul hdr 5ul ct ctl tag inner in
       if e = 0uy then 0ul else 1ul
-    end else Hacl.AEAD_Chacha20Poly1305.decrypt inner ct ctl hdr 5ul key nonce tag in
-  if r = 0ul then inc_seq seq 8ul else ();
+    end else begin
+      let e = Hacl.AEAD_Chacha20Poly1305.decrypt inner ct ctl hdr 5ul key nonce tag in
+      let hh = get () in
+      if e = 0ul then begin
+        assert (decrypt_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq)
+          (B.as_seq h0 hdr) (B.as_seq h0 body) == Some (B.as_seq hh inner));
+        0ul
+      end else begin
+        assert (decrypt_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq)
+          (B.as_seq h0 hdr) (B.as_seq h0 body) == None);
+        1ul
+      end
+    end in
+  let hd = get () in
+  assert (B.as_seq hd seq == B.as_seq h0 seq);
+  if r = 0ul then begin
+    assert (decrypt_record suite (B.as_seq h0 key) (B.as_seq h0 iv) (B.as_seq h0 seq)
+      (B.as_seq h0 hdr) (B.as_seq h0 body) == Some (B.as_seq hd inner));
+    inc_seq seq 8ul
+  end else ();
   pop_frame ();
   r
+#pop-options
 
 (* index of last nonzero byte in b[0..i), or n (= length b) if none (all padding) *)
 val last_nz : b:ibuf -> n:U32.t{U32.v n = B.length b} -> i:U32.t{U32.v i <= U32.v n}

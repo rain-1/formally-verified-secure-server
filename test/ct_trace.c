@@ -43,7 +43,8 @@ int main(int argc, char **argv)
 
     EverCrypt_AutoConfig2_init();
     bool aes = EverCrypt_AutoConfig2_has_aesni() && EverCrypt_AutoConfig2_has_pclmulqdq()
-        && EverCrypt_AutoConfig2_has_sse();
+        && EverCrypt_AutoConfig2_has_sse() && EverCrypt_AutoConfig2_has_avx()
+        && EverCrypt_AutoConfig2_has_movbe();
 
     VALGRIND_MAKE_MEM_UNDEFINED(key, sizeof key);
     VALGRIND_MAKE_MEM_UNDEFINED(nonce, sizeof nonce);
