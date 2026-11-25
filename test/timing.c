@@ -14,6 +14,7 @@
 #include <x86intrin.h>
 
 #include "EverCrypt_AutoConfig2.h"
+#include "Hacl_Curve25519_51.h"
 #include "Hacl_HKDF.h"
 #include "Hacl_HMAC.h"
 #include "Hacl_P256.h"
@@ -219,6 +220,38 @@ static void record_open(const char *name, uint8_t suite, bool aes, uint64_t samp
     report(name, groups, 1);
 }
 
+static void key_exchange(uint64_t samples)
+{
+    const char *name = "X25519 exchange";
+    uint8_t peer_scalar[32] = {19}, peer[32];
+    uint8_t scalar[32], public_share[32], shared[32], peer_shared[32];
+    struct stats groups[2] = {0};
+    Hacl_Curve25519_51_secret_to_public(peer, peer_scalar);
+
+    for (uint64_t i = 0; i < samples + WARMUP; i++) {
+        unsigned group = next() & 1U;
+        uint8_t mask = (uint8_t)(0U - group);
+        for (size_t j = 0; j < sizeof scalar; j++)
+            scalar[j] = (uint8_t)next() & mask;
+
+        /* The server generates its public share and shared secret in this order. */
+        unsigned cpu_before, cpu_after;
+        uint64_t before = ticks(&cpu_before);
+        Hacl_Curve25519_51_secret_to_public(public_share, scalar);
+        bool ok = Hacl_Curve25519_51_ecdh(shared, scalar, peer);
+        uint64_t after = ticks(&cpu_after);
+
+        if (!ok || !Hacl_Curve25519_51_ecdh(peer_shared, peer_scalar, public_share)
+            || memcmp(shared, peer_shared, sizeof shared)) {
+            fprintf(stderr, "%s: peers did not agree on a shared secret\n", name);
+            exit(1);
+        }
+        if (i >= WARMUP && cpu_before == cpu_after && after >= before)
+            record(&groups[group], (double)(after - before));
+    }
+    report(name, groups, 1);
+}
+
 static void signing(const char *name, bool vary_nonce, uint64_t samples)
 {
     uint8_t message[130] = {0}, signature[64];
@@ -294,6 +327,7 @@ int main(int argc, char **argv)
         record_open("Open record, AES-GCM", 1, aes, samples);
     else
         puts("Open record, AES-GCM: skipped (AES acceleration unavailable)");
+    key_exchange(samples / 10);
     signing("P-256 signing key", false, samples / 10);
     signing("P-256 signing nonce", true, samples / 10);
     return 0;

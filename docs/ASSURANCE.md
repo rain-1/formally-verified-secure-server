@@ -83,24 +83,26 @@ make timing ct-trace CC=clang OUT=_build/server-clang TIMING_CPU=3 SAMPLES=10000
 Choose an available logical CPU on an otherwise idle machine. The timing target uses x86-64 RDTSCP and GNU objdump. The trace target also needs Valgrind and its development headers. The tests use synthetic inputs in local processes.
 
 - **Hardware timing.** The harness links the server's native archive and checks that its comparator instruction bytes match the release executable. Randomly interleaved inputs exercise first versus last mismatch with warm and flushed cache lines, and fixed versus random operand bytes at one mismatch position. The Finished rejection samples cover key derivation, MAC comparison, and alert encryption for each supported suite. Both classes take the same rejection path. The record-opening samples vary the traffic key while holding the plaintext, record length, IV, and sequence number fixed. The timer covers authentication, decryption, and content-type extraction for a valid unpadded record. The harness checks every output against its fixture. P-256 samples vary a valid signing key or nonce while the other scalar stays fixed. [Welch t-test method](https://eprint.iacr.org/2016/1123) · [TLS 1.3 record protection](https://www.rfc-editor.org/rfc/rfc8446#section-5.2)
+- **X25519 timing.** Each sample measures public-share generation and shared-secret derivation together, in the order used by the server. The classes use a fixed or randomized private scalar against the same peer public share. Outside the measured interval, the harness checks that the peer derives the same shared secret on every iteration. [RFC 7748 §6.1](https://www.rfc-editor.org/rfc/rfc7748.html#section-6.1)
 - **Machine code.** In the GCC 14.2 `-O2` server, `Tls_Conn_check_cfin` compares the first five MAC bytes inline and calls `Tls_Util_ct_eq` for the rest. Clang 19.1.7 `-O2` inlines the full comparison using two fixed-width SIMD loads per operand. Both builds combine differences with XOR and OR and branch on the match bit after processing all 32 bytes. The standalone comparator also uses public offsets and loop bounds in both builds.
-- **Executed branches and addresses.** Memcheck tags synthetic secrets and checks their use in conditional control flow and addressing. It covers HKDF-Expand and HMAC, the Finished comparator, X25519, P-256 signing, and encryption with ChaCha20-Poly1305 and AES-128-GCM when supported. The harness declassifies the return statuses after the calls. The tainted positive control must produce a conditional-branch report. [Memcheck V bits](https://valgrind.org/docs/manual/mc-manual.html#mc-manual.machine) · [ctgrind method](https://github.com/agl/ctgrind)
+- **Executed branches and addresses.** Memcheck tags synthetic secrets and checks their use in conditional control flow and addressing. It covers HKDF-Expand and HMAC, the Finished comparator, X25519 public-share and shared-secret derivation, P-256 signing, and the extracted `Tls_Conn_seal_app` path with each supported suite. Sealing marks the write key, IV, and plaintext as secret and compares the emitted record with a direct AEAD fixture. The harness declassifies primitive return statuses and wire bytes at the boundary where they become observable. The tainted positive control must produce a conditional-branch report. [Memcheck V bits](https://valgrind.org/docs/manual/mc-manual.html#mc-manual.machine) · [ctgrind method](https://github.com/agl/ctgrind)
 
-**Recorded results.** Both builds used `-O2` on logical CPU 3 of an AMD Ryzen 5 7600X running Linux 6.12.117. Each build used one million measurements per comparison, Finished rejection, or record-opening experiment and 100,000 per signing experiment. Memcheck used Valgrind 3.24.0.
+**Recorded results.** Both builds used `-O2` on logical CPU 3 of an AMD Ryzen 5 7600X running Linux 6.12.118. Each build used one million measurements per comparison, Finished rejection, or record-opening experiment and 100,000 per X25519 or signing experiment. Memcheck used Valgrind 3.24.0.
 
 | Experiment | Welch t, GCC 14.2 | Welch t, Clang 19.1.7 |
 |---|---:|---:|
-| Early-exit control | -2300.740 | -1419.777 |
-| First vs. last mismatch, warm | +1.205 | -1.419 |
-| Fixed vs. random operands, warm | -1.000 | -1.079 |
-| First vs. last mismatch, flushed | -0.251 | -0.646 |
-| Finished rejection, ChaCha20 | +0.486 | +2.132 |
-| Finished rejection, AES-GCM | -0.556 | +0.977 |
-| Record opening, ChaCha20 | +1.690 | -1.002 |
-| Record opening, AES-GCM | +2.410 | +1.114 |
-| P-256 signing, fixed vs. random key | -0.238 | +0.563 |
-| P-256 signing, fixed vs. random nonce | -0.221 | -0.208 |
+| Early-exit control | -1959.772 | -2509.633 |
+| First vs. last mismatch, warm | +0.013 | +1.058 |
+| Fixed vs. random operands, warm | +1.315 | +1.569 |
+| First vs. last mismatch, flushed | +0.783 | -0.811 |
+| Finished rejection, ChaCha20 | +0.514 | +0.478 |
+| Finished rejection, AES-GCM | +0.239 | -1.162 |
+| Record opening, ChaCha20 | +0.717 | -0.484 |
+| Record opening, AES-GCM | +0.024 | -0.883 |
+| X25519, fixed vs. random private scalar | +0.464 | -1.414 |
+| P-256 signing, fixed vs. random key | -0.455 | +0.971 |
+| P-256 signing, fixed vs. random nonce | +2.070 | -0.860 |
 
-Both controls crossed the screening threshold of `|t| = 5`. The largest measured `|t|` among server paths was 2.410. Memcheck reported zero errors in the selected crypto traces and reported the tainted control branch on both builds.
+The early-exit control crossed the screening threshold of `|t| = 5` in both builds. The largest measured `|t|` among the crypto experiments was 2.070. Memcheck reported zero errors in the selected traces, including record sealing with both suites, and detected the tainted control branch on both builds.
 
 Open coverage includes taint analysis of record opening, TLS signing through DER serialization, other CPU models and compiler flags, transient execution, shared-core contention, and power or frequency leakage. The timing results cover the specified fixtures on one CPU model. [Frequency-dependent timing](https://www.hertzbleed.com/hertzbleed.pdf)
