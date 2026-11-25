@@ -2,7 +2,6 @@
 """Plot the README's recorded formalization progress from Git history."""
 
 import argparse
-import math
 import re
 import subprocess
 from pathlib import Path
@@ -61,8 +60,6 @@ def history(*, committed_only=False):
             rows = {}
         snapshots.append((commit[:7], rows))
 
-    first = next((i for i, (_, rows) in enumerate(snapshots) if rows), len(snapshots))
-    snapshots = snapshots[first:]
     if not committed_only:
         working_tree = progress((ROOT / "README.md").read_text(encoding="utf-8"))
         if not snapshots or working_tree != snapshots[-1][1]:
@@ -78,9 +75,11 @@ def draw(snapshots, output):
     revisions, rows = zip(("0% baseline", baseline), *snapshots)
 
     figure, axis = plt.subplots(figsize=(11.3, 5.9), facecolor=PAPER)
-    figure.subplots_adjust(left=0.085, right=0.695, bottom=0.14, top=0.73)
+    figure.subplots_adjust(left=0.085, right=0.695, bottom=0.20, top=0.73)
     figure.text(0.04, 0.92, "Formalization progress", fontsize=25, weight="bold", color=INK)
-    figure.text(0.04, 0.86, "Recorded README percentages by commit · 100% is the target", fontsize=12, color=MUTED)
+    commit_count = len(snapshots) - (snapshots[-1][0] == "Working tree")
+    figure.text(0.04, 0.86, f"Recorded README percentages across {commit_count} mainline commits",
+                fontsize=12, color=MUTED)
     handles = [
         Line2D([], [], color=color, marker=marker, linestyle="none", label=name)
         for name, color, marker in STATUS_STYLES.values()
@@ -94,6 +93,12 @@ def draw(snapshots, output):
     axis.axhline(100, color="#9ba7ad", linestyle=(0, (3, 3)), linewidth=0.9)
     for percent in (0, 25, 50, 75):
         axis.axhline(percent, color="#dde3e7", linewidth=0.8)
+
+    first_recorded = next(i for i, snapshot in enumerate(rows[1:], start=1) if snapshot)
+    if first_recorded > 1:
+        axis.axvspan(0.5, first_recorded - 0.5, color="#e4e9ed", zorder=0)
+        axis.text(first_recorded / 2, 50, "Before README\nprogress tracking", ha="center",
+                  va="center", color=MUTED, fontsize=10)
 
     for label in latest:
         for i, (revision, snapshot) in enumerate(zip(revisions, rows)):
@@ -127,12 +132,11 @@ def draw(snapshots, output):
             arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65, "relpos": (0, 0.5)},
         )
 
-    stride = max(1, math.ceil(last / 9))
-    ticks = [*range(0, last - stride + 1, stride), last]
     axis.set_xlim(-0.15, len(revisions) - 0.85)
     levels = [0, 25, 50, 75, 100]
     axis.set_yticks(levels, labels=[f"{level}%" for level in levels])
-    axis.set_xticks(ticks, labels=[revisions[i] for i in ticks])
+    axis.set_xticks(range(len(revisions)), labels=revisions, rotation=55, ha="right",
+                    rotation_mode="anchor")
     axis.tick_params(axis="both", length=0, labelsize=9, colors=MUTED, pad=7)
     axis.spines[:].set_visible(False)
     axis.set_xlabel("Git history · oldest to newest", color=MUTED, fontsize=10, labelpad=12)
