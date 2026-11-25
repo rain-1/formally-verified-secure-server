@@ -94,12 +94,6 @@ def draw(snapshots, output):
     for percent in (0, 25, 50, 75):
         axis.axhline(percent, color="#dde3e7", linewidth=0.8)
 
-    first_recorded = next(i for i, snapshot in enumerate(rows[1:], start=1) if snapshot)
-    if first_recorded > 1:
-        axis.axvspan(0.5, first_recorded - 0.5, color="#e4e9ed", zorder=0)
-        axis.text(first_recorded / 2, 50, "Before README\nprogress tracking", ha="center",
-                  va="center", color=MUTED, fontsize=10)
-
     for label in latest:
         for i, (revision, snapshot) in enumerate(zip(revisions, rows)):
             point = snapshot.get(label)

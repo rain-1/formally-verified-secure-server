@@ -28,7 +28,7 @@ In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inpu
 
 ![Seven formalization metrics on one chart, with a red 0% baseline and markers colored by README status](docs/progress.png)
 
-The chart labels every mainline commit in the snapshot. The shaded region marks commits before the README tracked progress. The separate red 0% baseline is a visual reference. Blue diamonds mark completed areas. Hollow markers show working-tree values when included. The Rust migration expanded the shell roadmap from four to five milestones. Regenerate the published view with `python3 tools/plot_progress.py --committed-only` using Matplotlib.
+The chart labels every mainline commit in the snapshot. The separate red 0% baseline is a visual reference. Blue diamonds mark completed areas. Hollow markers show working-tree values when included. The Rust migration expanded the shell roadmap from four to five milestones. Regenerate the published view with `python3 tools/plot_progress.py --committed-only` using Matplotlib.
 
 ## Defense in depth
 
