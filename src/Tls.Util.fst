@@ -47,11 +47,21 @@ let put_u16 out pos v =
 
 val put_u24 : out:ibuf -> pos:U32.t{U32.v pos + 3 <= B.length out} -> v:U32.t{U32.v v < 16777216}
   -> Stack U32.t (requires fun h -> B.live h out)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + 3)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + 3 /\
+        S.slice (B.as_seq h1 out) 0 (U32.v pos) == S.slice (B.as_seq h0 out) 0 (U32.v pos) /\
+        S.slice (B.as_seq h1 out) (U32.v pos) (U32.v r) == Spec.u24_be (U32.v v))
 let put_u24 out pos v =
+  let h0 = get () in
+  assert_norm (pow2 8 = 256 /\ pow2 16 = 65536);
+  FStar.UInt.logand_mask #32 (U32.v v) 8;
+  let mid = U32.shift_right v 8ul in
+  FStar.UInt.logand_mask #32 (U32.v mid) 8;
   B.upd out pos (FStar.Int.Cast.uint32_to_uint8 (U32.shift_right v 16ul));
-  B.upd out (U32.add pos 1ul) (FStar.Int.Cast.uint32_to_uint8 (U32.logand (U32.shift_right v 8ul) 255ul));
+  B.upd out (U32.add pos 1ul) (FStar.Int.Cast.uint32_to_uint8 (U32.logand mid 255ul));
   B.upd out (U32.add pos 2ul) (FStar.Int.Cast.uint32_to_uint8 (U32.logand v 255ul));
+  let h1 = get () in
+  S.lemma_eq_intro (S.slice (B.as_seq h1 out) 0 (U32.v pos)) (S.slice (B.as_seq h0 out) 0 (U32.v pos));
+  S.lemma_eq_intro (S.slice (B.as_seq h1 out) (U32.v pos) (U32.v pos + 3)) (Spec.u24_be (U32.v v));
   U32.add pos 3ul
 
 (* copy [len] bytes of src into out at pos *)
@@ -69,19 +79,68 @@ let put_buf out pos src len =
   S.lemma_eq_intro (S.slice (B.as_seq h1 out) 0 (U32.v pos)) (S.slice (B.as_seq h0 out) 0 (U32.v pos));
   U32.add pos len
 
-(* Memory-safety-only literal writer (used where the exact bytes are not part of a proof). *)
-val put_lit : out:ibuf -> pos:U32.t -> lit:lbuf -> l:U32.t{U32.v l = B.length lit}
-  -> j:U32.t{U32.v j <= U32.v l /\ U32.v pos + U32.v l <= B.length out}
-  -> Stack U32.t (requires fun h -> B.live h out /\ B.live h lit)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + U32.v l)
-     (decreases (U32.v l - U32.v j))
-let rec put_lit out pos lit l j =
-  if j = l then U32.add pos l
-  else begin
-    let c = MB.index lit j in
-    B.upd out (U32.add pos j) c;
-    put_lit out pos lit l (U32.add j 1ul)
-  end
+(* Convert a write and its preserved prefix into one concatenated prefix. *)
+let append_written (before after:Spec.bytes) (pos:nat{pos <= S.length before}) (part:Spec.bytes)
+  : Lemma
+      (requires pos + S.length part <= S.length after /\
+        S.slice after 0 pos == S.slice before 0 pos /\
+        S.slice after pos (pos + S.length part) == part)
+      (ensures S.slice after 0 (pos + S.length part) == S.append (S.slice before 0 pos) part) =
+  S.lemma_eq_intro (S.slice after 0 (pos + S.length part)) (S.append (S.slice before 0 pos) part)
+
+let empty_prefix (b:Spec.bytes) : Lemma (S.slice b 0 0 == S.empty) =
+  S.lemma_eq_intro (S.slice b 0 0) S.empty
+
+inline_for_extraction
+val append_u8 : out:ibuf -> pos:U32.t{U32.v pos + 1 <= B.length out} -> v:U8.t
+  -> Stack U32.t (requires fun h -> B.live h out)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + 1 /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) == S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (S.create 1 v))
+let append_u8 out pos v =
+  let h0 = get () in
+  let stop = put_u8 out pos v in
+  let h1 = get () in
+  append_written (B.as_seq h0 out) (B.as_seq h1 out) (U32.v pos) (S.create 1 v);
+  stop
+
+inline_for_extraction
+val append_u16 : out:ibuf -> pos:U32.t{U32.v pos + 2 <= B.length out} -> v:U32.t{U32.v v < 65536}
+  -> Stack U32.t (requires fun h -> B.live h out)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + 2 /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) == S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (Spec.u16_be (U32.v v)))
+let append_u16 out pos v =
+  let h0 = get () in
+  let stop = put_u16 out pos v in
+  let h1 = get () in
+  append_written (B.as_seq h0 out) (B.as_seq h1 out) (U32.v pos) (Spec.u16_be (U32.v v));
+  stop
+
+inline_for_extraction
+val append_u24 : out:ibuf -> pos:U32.t{U32.v pos + 3 <= B.length out} -> v:U32.t{U32.v v < 16777216}
+  -> Stack U32.t (requires fun h -> B.live h out)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + 3 /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) == S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (Spec.u24_be (U32.v v)))
+let append_u24 out pos v =
+  let h0 = get () in
+  let stop = put_u24 out pos v in
+  let h1 = get () in
+  append_written (B.as_seq h0 out) (B.as_seq h1 out) (U32.v pos) (Spec.u24_be (U32.v v));
+  stop
+
+inline_for_extraction
+val append_buf : out:ibuf -> pos:U32.t -> src:ibuf -> len:U32.t
+  -> Stack U32.t
+     (requires fun h -> B.live h out /\ B.live h src /\ B.disjoint out src /\
+        U32.v pos + U32.v len <= B.length out /\ U32.v len <= B.length src)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = U32.v pos + U32.v len /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+         S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (S.slice (B.as_seq h0 src) 0 (U32.v len)))
+let append_buf out pos src len =
+  let h0 = get () in
+  let stop = put_buf out pos src len in
+  let h1 = get () in
+  append_written (B.as_seq h0 out) (B.as_seq h1 out) (U32.v pos) (S.slice (B.as_seq h0 src) 0 (U32.v len));
+  stop
 
 (* Literal writer with a content postcondition. Requires out to be disjoint from the literal. *)
 val put_lit_go : out:ibuf -> pos:U32.t -> lit:lbuf -> l:U32.t{U32.v l = B.length lit}

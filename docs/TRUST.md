@@ -18,6 +18,7 @@ A proof is a statement about a model. These are the things the guarantees depend
 
 **Unverified code**
 - The Rust shell uses owned file descriptors, checked indexing, and typed buffers. The hand-written C ABI in `shell/src/core.rs` must uphold the Low* contracts. The site loader, Linux syscall wrappers, and sandbox policy remain trusted. The socket suite exercises the combined binary, and ASan/UBSan instrument the C core in the sanitizer build.
+- The C adapter in `csrc/everparse/ch_check.c` calls the generated ClientHello validator at offset zero with a no-op error callback and forwards its raw result. The F* binding assumes that the adapter and validator satisfy the prefix contract for the local 3D grammar. [Proof scope](PROOFS.md#tls-13-srctlsfst)
 - Offline tool `tools/prepare-cert.py` (runs at deploy time, not in the server).
 
 **Environment**

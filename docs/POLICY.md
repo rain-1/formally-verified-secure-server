@@ -6,6 +6,7 @@ HTTP/1.1 only; `GET` and `HEAD`; origin-form targets; keep-alive and sequential 
 No percent-decoding: files must be named `[A-Za-z0-9._~-]` (no leading dot) to be served. Query strings are ignored.
 `/dir/` serves `/dir/index.html`. Anything outside this subset gets 400/405/431 — never best-effort parsing.
 Limits: 8 KiB request head, 2 KiB target, 1 KiB path, 100 header lines. Idle timeout 15 s.
+The server requests connection closure when a `Connection` field contains the ASCII substring `close`, using case-insensitive matching for both the name and the substring.
 Not implemented: HTTP/2, range requests, conditional requests (ETag/Last-Modified), compression, caching headers, redirects.
 
 ## TLS

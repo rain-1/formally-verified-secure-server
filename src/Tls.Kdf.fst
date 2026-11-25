@@ -25,6 +25,29 @@ let keys_installed (state:S.seq U8.t{S.length state = 512}) (ko vo so:nat)
   S.slice state vo (vo + 12) == Spec.traffic_iv secret /\
   S.slice state so (so + 8) == S.create 8 0uy
 
+let preserve_key_write_trlen (st:stb) (ko vo so:U32.t{U32.v ko + 32 <= U32.v vo /\
+    U32.v vo + 12 <= U32.v so /\ U32.v so + 8 <= 512}) (before after:HS.mem)
+  : Lemma
+      (requires B.live before st /\
+        B.modifies (B.loc_union
+          (B.loc_union (B.loc_buffer (B.gsub st ko 32ul)) (B.loc_buffer (B.gsub st vo 12ul)))
+          (B.loc_buffer (B.gsub st so 8ul))) before after)
+      (ensures U32.v so + 8 <= U32.v o_trlen ==> stored_trlen (B.as_seq after st) == stored_trlen (B.as_seq before st)) =
+  if U32.v so + 8 <= U32.v o_trlen then begin
+    let key = B.gsub st ko 32ul in
+    let iv = B.gsub st vo 12ul in
+    let seq = B.gsub st so 8ul in
+    B.loc_buffer_mgsub_eq (B.trivial_preorder U8.t) st ko 32ul;
+    B.loc_buffer_mgsub_eq (B.trivial_preorder U8.t) st vo 12ul;
+    B.loc_buffer_mgsub_eq (B.trivial_preorder U8.t) st so 8ul;
+    B.modifies_buffer_from_to_elim st o_trlen 242ul
+      (B.loc_union (B.loc_union (B.loc_buffer key) (B.loc_buffer iv)) (B.loc_buffer seq)) before after;
+    S.lemma_index_slice (B.as_seq before st) 240 242 0;
+    S.lemma_index_slice (B.as_seq before st) 240 242 1;
+    S.lemma_index_slice (B.as_seq after st) 240 242 0;
+    S.lemma_index_slice (B.as_seq after st) 240 242 1
+  end
+
 (* write AEAD key/iv/seq derived from [secret] into st at offsets ko/vo/so *)
 val install_keys : st:stb -> ko:U32.t -> vo:U32.t -> so:U32.t
   -> secret:ibuf{B.length secret = 32}
@@ -34,9 +57,11 @@ val install_keys : st:stb -> ko:U32.t -> vo:U32.t -> so:U32.t
      (ensures fun h0 _ h1 ->
         B.modifies (B.loc_buffer st) h0 h1 /\
         keys_installed (B.as_seq h1 st) (U32.v ko) (U32.v vo) (U32.v so)
-          (S.index (B.as_seq h0 st) (U32.v o_suite)) (B.as_seq h0 secret))
+          (S.index (B.as_seq h0 st) (U32.v o_suite)) (B.as_seq h0 secret) /\
+        (U32.v so + 8 <= U32.v o_trlen ==> stored_trlen (B.as_seq h1 st) == stored_trlen (B.as_seq h0 st)))
 #push-options "--fuel 2 --z3rlimit 500"
 let install_keys st ko vo so secret =
+  let h0 = get () in
   push_frame ();
   let k = B.alloca 0uy 32ul in
   let v = B.alloca 0uy 12ul in
@@ -46,10 +71,15 @@ let install_keys st ko vo so secret =
   let iv = B.sub st vo 12ul in
   let seq = B.sub st so 8ul in
   assert (B.disjoint key iv /\ B.disjoint key seq /\ B.disjoint iv seq);
+  let before = get () in
+  assert (B.as_seq before st == B.as_seq h0 st);
   B.blit k 0ul key 0ul 32ul;
   B.blit v 0ul iv 0ul 12ul;
   B.fill seq 0uy 8ul;
   let h = get () in
+  preserve_key_write_trlen st ko vo so before h;
+  assert (U32.v so + 8 <= U32.v o_trlen ==>
+    stored_trlen (B.as_seq h st) == stored_trlen (B.as_seq h0 st));
   FStar.Seq.Properties.slice_slice (B.as_seq h st) (U32.v ko) (U32.v ko + 32) 0
     (if U8.v suite = 1 then 16 else 32);
   pop_frame ()
@@ -106,11 +136,13 @@ val traffic_secrets : st:stb -> tr:trb -> hs:ibuf{B.length hs = 32}
   -> Stack unit
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h hs /\ B.disjoint st tr /\ B.disjoint st hs /\ B.disjoint tr hs)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
+        transcript h1 st tr == transcript h0 st tr /\
         S.slice (B.as_seq h1 st) (U32.v o_chs) (U32.v o_chs + 32) ==
           Spec.derive_secret (B.as_seq h0 hs) (Spec.lit_bytes "c hs traffic") (Spec.sha256 (transcript h0 st tr)) /\
         S.slice (B.as_seq h1 st) (U32.v o_shs) (U32.v o_shs + 32) ==
           Spec.derive_secret (B.as_seq h0 hs) (Spec.lit_bytes "s hs traffic") (Spec.sha256 (transcript h0 st tr)))
 let traffic_secrets st tr hs =
+  let h0 = get () in
   push_frame ();
   let th1 = B.alloca 0uy 32ul in
   let chs = B.alloca 0uy 32ul in
@@ -127,19 +159,28 @@ let traffic_secrets st tr hs =
   save32 st o_shs shs;
   let hb = get () in
   assert (S.equal (S.slice (B.as_seq hb st) 8 40) (S.slice (B.as_seq ha st) 8 40));
+  assert (stored_trlen (B.as_seq hb st) == stored_trlen (B.as_seq h0 st));
+  assert (transcript hb st tr == transcript h0 st tr);
   pop_frame ()
+
+[@@"opaque_to_smt"]
+noextract let handshake_schedule (state:Spec.bytes{S.length state = 512})
+  (shared:Spec.bytes{S.length shared = 32}) (messages:Spec.bytes{S.length messages <= 20480}) : prop =
+  let hs = Spec.handshake_secret shared in
+  let th = Spec.sha256 messages in
+  S.slice state (U32.v o_chs) (U32.v o_chs + 32) == Spec.derive_secret hs (Spec.lit_bytes "c hs traffic") th /\
+  S.slice state (U32.v o_shs) (U32.v o_shs + 32) == Spec.derive_secret hs (Spec.lit_bytes "s hs traffic") th /\
+  S.slice state (U32.v o_ms) (U32.v o_ms + 32) == Spec.master_secret hs
 
 (* after ClientHello+ServerHello are in the transcript *)
 val key_sched : st:stb -> tr:trb -> shared:ibuf{B.length shared = 32}
   -> Stack unit
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h shared /\ B.disjoint st tr /\ B.disjoint st shared /\ B.disjoint tr shared)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
-        (let hs = Spec.handshake_secret (B.as_seq h0 shared) in
-         let th = Spec.sha256 (transcript h0 st tr) in
-         S.slice (B.as_seq h1 st) (U32.v o_chs) (U32.v o_chs + 32) == Spec.derive_secret hs (Spec.lit_bytes "c hs traffic") th /\
-         S.slice (B.as_seq h1 st) (U32.v o_shs) (U32.v o_shs + 32) == Spec.derive_secret hs (Spec.lit_bytes "s hs traffic") th /\
-         S.slice (B.as_seq h1 st) (U32.v o_ms) (U32.v o_ms + 32) == Spec.master_secret hs))
+        transcript h1 st tr == transcript h0 st tr /\
+        handshake_schedule (B.as_seq h1 st) (B.as_seq h0 shared) (transcript h0 st tr))
 let key_sched st tr shared =
+  let h0 = get () in
   push_frame ();
   let hs = B.alloca 0uy 32ul in
   let ms = B.alloca 0uy 32ul in
@@ -151,6 +192,10 @@ let key_sched st tr shared =
   let hb = get () in
   assert (S.equal (S.slice (B.as_seq hb st) 8 40) (S.slice (B.as_seq ha st) 8 40));
   assert (S.equal (S.slice (B.as_seq hb st) 40 72) (S.slice (B.as_seq ha st) 40 72));
+  assert (stored_trlen (B.as_seq hb st) == stored_trlen (B.as_seq ha st));
+  assert (transcript hb st tr == transcript h0 st tr);
+  reveal_opaque (`%handshake_schedule)
+    (handshake_schedule (B.as_seq hb st) (B.as_seq h0 shared) (transcript h0 st tr));
   pop_frame ()
 
 (* application traffic secrets from st.ms and st.th (CH..server Finished) *)

@@ -136,7 +136,8 @@ let rec scan_ext b hi p pr =
 val parse : b:body -> bl:U32.t{U32.v bl = B.length b} -> pr:resb
   -> Stack unit
      (requires fun h -> B.live h b /\ B.live h pr /\ B.disjoint b pr)
-     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1)
+     (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1 /\
+       (B.get h1 pr 0 == 1ul ==> Tls.ChValid.valid_body (B.as_seq h0 b)))
 let parse b bl pr =
   let z = 0ul in
   B.upd pr 0ul 1ul;

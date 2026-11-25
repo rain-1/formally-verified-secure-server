@@ -48,6 +48,9 @@ let trlen_g (s:S.seq U8.t{S.length s = 512}) : GTot (n:nat{n <= 20480}) =
 let transcript (hst:HS.mem) (st:stb) (tr:trb) : GTot Spec.bytes =
   S.slice (B.as_seq hst tr) 0 (trlen_g (B.as_seq hst st))
 
+noextract let server_hs_secret (h:HS.mem) (st:stb) : GTot (b:Spec.bytes{S.length b = 32}) =
+  S.slice (B.as_seq h st) (U32.v o_shs) (U32.v o_shs + 32)
+
 val get_trlen : st:stb -> Stack U32.t (requires fun h -> B.live h st)
   (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536 /\
      U32.v r = stored_trlen (B.as_seq h0 st))
@@ -60,12 +63,15 @@ let get_trlen st =
 
 val set_trlen : st:stb -> v:U32.t{U32.v v < 65536} -> Stack unit (requires fun h -> B.live h st)
   (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
-     stored_trlen (B.as_seq h1 st) = U32.v v)
+     stored_trlen (B.as_seq h1 st) = U32.v v /\ server_hs_secret h1 st == server_hs_secret h0 st)
 let set_trlen st v =
+  let h0 = get () in
   assert_norm (pow2 8 = 256);
   FStar.UInt.logand_mask #32 (U32.v v) 8;
   B.upd st 240ul (FStar.Int.Cast.uint32_to_uint8 (U32.logand v 255ul));
-  B.upd st 241ul (FStar.Int.Cast.uint32_to_uint8 (U32.shift_right v 8ul))
+  B.upd st 241ul (FStar.Int.Cast.uint32_to_uint8 (U32.shift_right v 8ul));
+  let h1 = get () in
+  S.lemma_eq_intro (server_hs_secret h1 st) (server_hs_secret h0 st)
 
 (* append a handshake message to the transcript *)
 val tr_add : st:stb -> tr:trb -> msg:ibuf -> mlen:U32.t{U32.v mlen = B.length msg}
@@ -75,6 +81,7 @@ val tr_add : st:stb -> tr:trb -> msg:ibuf -> mlen:U32.t{U32.v mlen = B.length ms
      (ensures fun h0 ok h1 ->
         (let n = stored_trlen (B.as_seq h0 st) in
          ok == (n + U32.v mlen <= 20480)) /\
+        server_hs_secret h1 st == server_hs_secret h0 st /\
         (if ok then
            B.modifies (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) h0 h1 /\
            transcript h1 st tr == S.append (transcript h0 st tr) (B.as_seq h0 msg)

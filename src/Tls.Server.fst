@@ -18,6 +18,8 @@ open Tls.State
 open Tls.Kdf
 open Tls.Flight
 module H = Tls.Hello
+module S = FStar.Seq
+module Spec = Tls.Spec
 
 #set-options "--z3rlimit 300 --fuel 1 --ifuel 1"
 
@@ -55,19 +57,27 @@ let check_ch chb bl pr aesok =
 val emit_sh : out:ibuf{B.length out = 20480} -> sh:ibuf{B.length sh = 160} -> shl:U32.t{U32.v shl <= 160} -> ccs:bool
   -> Stack U32.t
      (requires fun h -> B.live h out /\ B.live h sh /\ B.disjoint out sh)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r <= 5 + 160 + 6)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r = 5 + U32.v shl + (if ccs then 6 else 0) /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+         Spec.server_hello_records (S.slice (B.as_seq h0 sh) 0 (U32.v shl)) ccs)
+#push-options "--split_queries always"
 let emit_sh out sh shl ccs =
-  let o = put_u8 out 0ul 22uy in
-  let o = put_u16 out o 771ul in
-  let o = put_u16 out o shl in
+  let h0 = get () in
+  empty_prefix (B.as_seq h0 out);
+  S.append_empty_l (S.create 1 22uy);
+  reveal_opaque (`%Spec.server_hello_records) (Spec.server_hello_records (S.slice (B.as_seq h0 sh) 0 (U32.v shl)) ccs);
+  let o = append_u8 out 0ul 22uy in
+  let o = append_u16 out o 771ul in
+  let o = append_u16 out o shl in
   let shm = B.sub sh 0ul shl in
-  let o = put_buf out o shm shl in
+  let o = append_buf out o shm shl in
   if ccs then begin
-    let o = put_u8 out o 20uy in
-    let o = put_u16 out o 771ul in
-    let o = put_u16 out o 1ul in
-    put_u8 out o 1uy
+    let o = append_u8 out o 20uy in
+    let o = append_u16 out o 771ul in
+    let o = append_u16 out o 1ul in
+    append_u8 out o 1uy
   end else o
+#pop-options
 
 val ecdh_part : epub:ibuf{B.length epub = 32} -> shared:ibuf{B.length shared = 32} -> rnd:ibuf{B.length rnd = 96}
   -> peer:ibuf{B.length peer = 32}
@@ -121,6 +131,100 @@ let note_hello st ad suite alpn =
   B.upd st o_suite (FStar.Int.Cast.uint32_to_uint8 suite);
   B.upd ad 1ul (if alpn = 1ul then 1uy else 0uy)
 
+type hello_material = {
+  session_id: (x:Spec.bytes{S.length x <= 32});
+  cipher_suite: (x:nat{x < 65536});
+  public_share: (x:Spec.bytes{S.length x = 32});
+  shared_secret: (x:Spec.bytes{S.length x = 32});
+}
+
+noextract let hello_matches (state:Spec.bytes{S.length state = 512})
+  (client:Spec.bytes{S.length client <= 4100}) (random:Spec.bytes{S.length random = 32})
+  (messages:Spec.bytes{S.length messages <= 20480}) (wire:Spec.bytes) (m:hello_material) : prop =
+  let server = Spec.server_hello random m.session_id m.cipher_suite m.public_share in
+  messages == S.append client server /\
+  wire == Spec.server_hello_records server (S.length m.session_id > 0) /\
+  handshake_schedule state m.shared_secret messages
+
+[@@"opaque_to_smt"]
+noextract let established_hello (state:Spec.bytes{S.length state = 512})
+  (client:Spec.bytes{S.length client <= 4100}) (random:Spec.bytes{S.length random = 32})
+  (messages:Spec.bytes{S.length messages <= 20480}) (wire:Spec.bytes) : prop =
+  exists (m:hello_material). hello_matches state client random messages wire m
+
+let certify_hello (state:Spec.bytes{S.length state = 512})
+  (client:Spec.bytes{S.length client <= 4100}) (random:Spec.bytes{S.length random = 32})
+  (messages:Spec.bytes{S.length messages <= 20480}) (wire:Spec.bytes) (m:hello_material)
+  : Lemma (requires hello_matches state client random messages wire m)
+          (ensures established_hello state client random messages wire) =
+  FStar.Classical.exists_intro (hello_matches state client random messages wire) m;
+  reveal_opaque (`%established_hello) (established_hello state client random messages wire)
+
+(* Append both hello messages, derive secrets, and emit the same ServerHello. *)
+private inline_for_extraction
+val complete_hello : st:stb -> tr:trb -> out:ibuf{B.length out = 20480} -> ad:B.buffer U8.t{B.length ad = 2}
+  -> rnd:ibuf{B.length rnd = 96} -> chm:ibuf -> rlen:U32.t{U32.v rlen = B.length chm /\ U32.v rlen <= 4100}
+  -> sidb:ibuf -> sl:U32.t{U32.v sl = B.length sidb /\ U32.v sl <= 32}
+  -> epub:ibuf{B.length epub = 32} -> shared:ibuf{B.length shared = 32} -> suite:U32.t
+  -> Stack U32.t
+     (requires fun h ->
+       B.live h st /\ B.live h tr /\ B.live h out /\ B.live h ad /\ B.live h rnd /\
+       B.live h chm /\ B.live h sidb /\ B.live h epub /\ B.live h shared /\
+       B.disjoint st tr /\ B.disjoint st out /\ B.disjoint st ad /\ B.disjoint st rnd /\
+       B.disjoint st chm /\ B.disjoint st sidb /\ B.disjoint st epub /\ B.disjoint st shared /\
+       B.disjoint tr out /\ B.disjoint tr ad /\ B.disjoint tr rnd /\ B.disjoint tr chm /\
+       B.disjoint tr sidb /\ B.disjoint tr epub /\ B.disjoint tr shared /\
+       B.disjoint out ad /\ B.disjoint out rnd /\ B.disjoint out chm /\ B.disjoint out sidb /\
+       B.disjoint out epub /\ B.disjoint out shared /\ B.disjoint ad rnd /\ B.disjoint ad chm /\
+       B.disjoint ad sidb /\ B.disjoint ad epub /\ B.disjoint ad shared /\ B.disjoint rnd sidb /\
+       B.disjoint rnd epub /\ B.disjoint sidb epub)
+     (ensures fun h0 r h1 ->
+       B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
+         (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 171 /\
+       (U32.v r <> 0 ==> established_hello (B.as_seq h1 st) (B.as_seq h0 chm)
+         (S.slice (B.as_seq h0 rnd) 0 32) (transcript h1 st tr) (S.slice (B.as_seq h1 out) 0 (U32.v r))))
+#push-options "--split_queries always"
+let complete_hello st tr out ad rnd chm rlen sidb sl epub shared suite =
+  let h0 = get () in
+  push_frame ();
+  set_trlen st 0ul;
+  let h_reset = get () in
+  empty_prefix (B.as_seq h_reset tr);
+  S.append_empty_l (B.as_seq h0 chm);
+  let t1 = tr_add st tr chm rlen in
+  let h_ch = get () in
+  assert (t1 ==> transcript h_ch st tr == B.as_seq h0 chm);
+  let sh = B.alloca 0uy 160ul in
+  let suite_id = U32.add 4864ul (U32.rem suite 4ul) in
+  let shl = build_sh sh rnd sidb sl epub suite_id in
+  let shm = B.sub sh 0ul shl in
+  let h_sh = get () in
+  assert (B.as_seq h_sh shm ==
+    Spec.server_hello (S.slice (B.as_seq h0 rnd) 0 32) (B.as_seq h0 sidb)
+      (U32.v suite_id) (B.as_seq h0 epub));
+  let t2 = tr_add st tr shm shl in
+  let h_schedule = get () in
+  assert (t1 /\ t2 ==>
+    transcript h_schedule st tr == S.append (B.as_seq h0 chm) (B.as_seq h_sh shm));
+  key_sched st tr shared;
+  let pos = emit_sh out sh shl (U32.gt sl 0ul) in
+  let written =
+    if t1 && t2 then begin
+      let h_end = get () in
+      certify_hello (B.as_seq h_end st) (B.as_seq h0 chm) (S.slice (B.as_seq h0 rnd) 0 32)
+        (transcript h_end st tr) (S.slice (B.as_seq h_end out) 0 (U32.v pos))
+        { session_id = B.as_seq h0 sidb; cipher_suite = U32.v suite_id;
+          public_share = B.as_seq h0 epub; shared_secret = B.as_seq h0 shared };
+      pos
+    end else (B.upd ad 0ul 80uy; 0ul) in
+  let h_end = get () in
+  pop_frame ();
+  let h_return = get () in
+  assert (B.as_seq h_return st == B.as_seq h_end st /\
+    transcript h_return st tr == transcript h_end st tr /\ B.as_seq h_return out == B.as_seq h_end out);
+  written
+#pop-options
+
 (* ClientHello -> (transcript, ServerHello, handshake keys, ServerHello record in out).
    Returns bytes written to out (>0), or 0 with ad[0] = alert description. ad[1] = ALPN http/1.1 flag. *)
 val hello_part :
@@ -130,9 +234,13 @@ val hello_part :
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h rnd /\ B.live h inp /\ B.live h out /\ B.live h ad /\ B.disjoint st tr /\ B.disjoint st rnd /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st ad /\ B.disjoint tr rnd /\ B.disjoint tr inp /\ B.disjoint tr out /\ B.disjoint tr ad /\ B.disjoint rnd inp /\ B.disjoint rnd out /\ B.disjoint rnd ad /\ B.disjoint inp out /\ B.disjoint inp ad /\ B.disjoint out ad)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
-                                (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 171)
-#push-options "--z3rlimit 1000"
+                                (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 171 /\
+       (U32.v r <> 0 ==> established_hello (B.as_seq h1 st)
+         (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
+         (transcript h1 st tr) (S.slice (B.as_seq h1 out) 0 (U32.v r))))
+#push-options "--z3rlimit 1000 --split_queries always"
 let hello_part st tr rnd inp rlen out ad =
+  let h0 = get () in
   push_frame ();
   let pr = B.alloca 0ul 12ul in
   let bl = U32.sub rlen 4ul in
@@ -154,20 +262,19 @@ let hello_part st tr rnd inp rlen out ad =
       let okdh = ecdh_part epub shared rnd peer in
       if not okdh then (B.upd ad 0ul 47uy; 0ul)
       else begin
-        set_trlen st 0ul;
         let chm = B.sub inp 5ul rlen in
-        let t1 = tr_add st tr chm rlen in
-        let sh = B.alloca 0uy 160ul in
         let sidb = B.sub chb so sl in
-        let shl = build_sh sh rnd sidb sl epub (U32.add 4864ul (U32.rem suite 4ul)) in
-        let shm = B.sub sh 0ul shl in
-        let t2 = tr_add st tr shm shl in
-        key_sched st tr shared;
-        let pos = emit_sh out sh shl (U32.gt sl 0ul) in
-        if not (t1 && t2) then (B.upd ad 0ul 80uy; 0ul) else pos
+        let before = get () in
+        assert (B.as_seq before chm == S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen) /\
+          B.as_seq before rnd == B.as_seq h0 rnd);
+        complete_hello st tr out ad rnd chm rlen sidb sl epub shared suite
       end
     end in
+  let h_end = get () in
   pop_frame ();
+  let h_return = get () in
+  assert (B.as_seq h_return st == B.as_seq h_end st /\
+    transcript h_return st tr == transcript h_end st tr /\ B.as_seq h_return out == B.as_seq h_end out);
   res
 #pop-options
 

@@ -37,9 +37,87 @@ noextract let hkdf_expand (prk:bytes{S.length prk >= 32 /\ S.length prk <= max_i
 let u16_be (v:nat{v < 65536}) : bytes =
   S.seq_of_list [U8.uint_to_t (v / 256); U8.uint_to_t (v % 256)]
 
+noextract let u24_be (v:nat{v < 16777216}) : bytes =
+  S.seq_of_list [U8.uint_to_t (v / 65536); U8.uint_to_t ((v / 256) % 256); U8.uint_to_t (v % 256)]
+
+(* RFC 8446 sections 4, 4.1.3, 4.2.1, and 4.2.8. The server emits
+   supported_versions followed by a single X25519 key share. *)
+[@@"opaque_to_smt"]
+noextract let server_hello (random:bytes{S.length random = 32})
+  (sid:bytes{S.length sid <= 32}) (suite:nat{suite < 65536})
+  (share:bytes{S.length share = 32}) : msg:bytes{S.length msg = 90 + S.length sid} =
+  let sl = S.length sid in
+  let header = S.append (S.create 1 2uy) (u24_be (86 + sl)) in
+  let legacy_version = S.append header (u16_be 771) in
+  let random_field = S.append legacy_version random in
+  let sid_len = S.append random_field (S.create 1 (U8.uint_to_t sl)) in
+  let session = S.append sid_len sid in
+  let cipher = S.append session (u16_be suite) in
+  let compression = S.append cipher (S.create 1 0uy) in
+  let ext_len = S.append compression (u16_be 46) in
+  let version_type = S.append ext_len (u16_be 43) in
+  let version_len = S.append version_type (u16_be 2) in
+  let version = S.append version_len (u16_be 772) in
+  let share_type = S.append version (u16_be 51) in
+  let share_len = S.append share_type (u16_be 36) in
+  let group = S.append share_len (u16_be 29) in
+  let key_len = S.append group (u16_be 32) in
+  S.append key_len share
+
+(* RFC 8446 section 5.1 and appendix D.4. The optional compatibility
+   message is a separate ChangeCipherSpec record. *)
+[@@"opaque_to_smt"]
+noextract let server_hello_records (hello:bytes{S.length hello <= 160}) (ccs:bool)
+  : records:bytes{S.length records = 5 + S.length hello + (if ccs then 6 else 0)} =
+  let header = S.append (S.append (S.create 1 22uy) (u16_be 771)) (u16_be (S.length hello)) in
+  let plaintext = S.append header hello in
+  if ccs then
+    let ccs_type = S.append plaintext (S.create 1 20uy) in
+    let ccs_version = S.append ccs_type (u16_be 771) in
+    let ccs_len = S.append ccs_version (u16_be 1) in
+    S.append ccs_len (S.create 1 1uy)
+  else plaintext
+
 unfold
 let lit_bytes (s:string) : Pure bytes (requires normalize (LowStar.Literal.is_ascii_string s)) (ensures fun r -> S.length r = normalize_term (List.Tot.length (String.list_of_string s))) =
   LowStar.Literal.u8s_of_ascii_string s
+
+noextract let handshake_header (kind:U8.t) (len:nat{len < 16777216})
+  : header:bytes{S.length header = 4} =
+  S.append (S.create 1 kind) (u24_be len)
+
+(* The only optional EncryptedExtensions entry selects HTTP/1.1. *)
+[@@"opaque_to_smt"]
+noextract let encrypted_extensions (alpn:bool) : msg:bytes{S.length msg = (if alpn then 21 else 6)} =
+  let len = if alpn then 15 else 0 in
+  let prefix = S.append (handshake_header 8uy (2 + len)) (u16_be len) in
+  if alpn then
+    let ext_type = S.append prefix (u16_be 16) in
+    let ext_len = S.append ext_type (u16_be 11) in
+    let list_len = S.append ext_len (u16_be 9) in
+    let protocol_len = S.append list_len (S.create 1 8uy) in
+    S.append protocol_len (lit_bytes "http/1.1")
+  else prefix
+
+(* The shell supplies the serialized CertificateEntry vector. *)
+[@@"opaque_to_smt"]
+noextract let certificate_message (chain:bytes{S.length chain <= 12000})
+  : msg:bytes{S.length msg = 8 + S.length chain} =
+  let len = S.length chain in
+  let context = S.append (handshake_header 11uy (4 + len)) (S.create 1 0uy) in
+  S.append (S.append context (u24_be len)) chain
+
+[@@"opaque_to_smt"]
+noextract let certificate_verify_message (signature:bytes{S.length signature <= 74})
+  : msg:bytes{S.length msg = 8 + S.length signature} =
+  let len = S.length signature in
+  let scheme = S.append (handshake_header 15uy (4 + len)) (u16_be 1027) in
+  S.append (S.append scheme (u16_be len)) signature
+
+[@@"opaque_to_smt"]
+noextract let finished_message (verify_data:bytes{S.length verify_data = 32})
+  : msg:bytes{S.length msg = 36} =
+  S.append (handshake_header 20uy 32) verify_data
 
 let tls13_prefix : r:bytes{S.length r = 6} = lit_bytes "tls13 "
 
@@ -76,6 +154,27 @@ let finished_key (secret:bytes{S.length secret = 32}) : b:bytes{S.length b = 32}
   expand_label secret 32 (lit_bytes "finished") S.empty
 let finished_verify (secret:bytes{S.length secret = 32}) (th:bytes{S.length th = 32}) : b:bytes{S.length b = 32} =
   hmac256 (finished_key secret) th
+
+(* The server's encrypted handshake flight before record protection.
+   The signature bytes come from the CertificateVerify signer. *)
+noextract let server_flight_prefix (alpn:bool) (chain:bytes{S.length chain <= 12000})
+  (signature:bytes{0 < S.length signature /\ S.length signature <= 74})
+  : prefix:bytes{S.length prefix <= 12111} =
+  S.append (S.append (encrypted_extensions alpn) (certificate_message chain))
+    (certificate_verify_message signature)
+
+[@@"opaque_to_smt"]
+noextract let server_flight (incoming:bytes{S.length incoming <= 20480})
+  (secret:bytes{S.length secret = 32}) (alpn:bool) (chain:bytes{S.length chain <= 12000})
+  (signature:bytes{0 < S.length signature /\ S.length signature <= 74}) : bytes =
+  let prefix = server_flight_prefix alpn chain signature in
+  S.append prefix (finished_message (finished_verify secret (sha256 (S.append incoming prefix))))
+
+[@@"opaque_to_smt"]
+noextract let matches_server_flight (incoming:bytes{S.length incoming <= 20480})
+  (secret:bytes{S.length secret = 32}) (alpn:bool) (chain:bytes{S.length chain <= 12000}) (wire:bytes) : prop =
+  exists (signature:bytes{0 < S.length signature /\ S.length signature <= 74}).
+    wire == server_flight incoming secret alpn chain signature
 
 (* Server CertificateVerify signature input with a SHA-256 transcript hash
    (RFC 8446 section 4.4.3, RFC 9846 section 4.5.2). *)
