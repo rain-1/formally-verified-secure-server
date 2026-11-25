@@ -60,6 +60,8 @@ def history(*, committed_only=False):
             rows = {}
         snapshots.append((commit[:7], rows))
 
+    first_recorded = next((i for i, (_, rows) in enumerate(snapshots) if rows), len(snapshots))
+    snapshots = snapshots[first_recorded:]
     if not committed_only:
         working_tree = progress((ROOT / "README.md").read_text(encoding="utf-8"))
         if not snapshots or working_tree != snapshots[-1][1]:
