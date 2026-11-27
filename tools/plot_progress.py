@@ -30,6 +30,17 @@ def git(*args):
     return subprocess.run(["git", *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
 
 
+def score(label, status):
+    match = PROGRESS.search(status)
+    if match is None:
+        return None
+    percentage, fraction = match.groups()
+    symbol = status.strip()[0]
+    if symbol not in STATUS_STYLES:
+        raise ValueError(f"Unrecognized progress status for {label}: {status.strip()}")
+    return int(percentage), fraction, symbol
+
+
 def progress(readme):
     section = readme.partition("\n## Verification progress\n")[2].split("\n## ", 1)[0]
     rows = {}
@@ -38,32 +49,54 @@ def progress(readme):
         if columns[0] or len(columns) < 3:
             continue
         _, label, status, *_ = columns
-        match = PROGRESS.search(status)
-        if match:
+        point = score(label, status)
+        if point is not None:
             label = label.strip().replace(r"\*", "*")
             if label == "C shell assurance":
                 label = "Shell assurance"
-            percentage, fraction = match.groups()
-            symbol = status.strip()[0]
-            if symbol not in STATUS_STYLES:
-                raise ValueError(f"Unrecognized progress status for {label}: {status.strip()}")
-            rows[label] = (int(percentage), fraction, symbol)
+            rows[label] = point
     return rows
 
 
+def milestone_credits(readme):
+    section = readme.partition("\n#### Milestone credits by commit\n")[2].split("\n##", 1)[0]
+    credits = {}
+    for line in section.splitlines():
+        columns = line.split("|")
+        if columns[0] or len(columns) < 5:
+            continue
+        _, revision, label, status, *_ = columns
+        point = score(label, status)
+        if point is not None:
+            credits.setdefault(revision.strip().strip("`"), {})[label.strip()] = point
+    return credits
+
+
 def history(*, committed_only=False):
+    current_readme = git("show", "HEAD:README.md") if committed_only else (ROOT / "README.md").read_text(encoding="utf-8")
+    credits = milestone_credits(current_readme)
+    carried = {}
     snapshots = []
     for commit in git("rev-list", "--reverse", "--first-parent", "HEAD").splitlines():
         if "README.md" in git("ls-tree", "--name-only", commit, "--", "README.md").splitlines():
             rows = progress(git("show", f"{commit}:README.md"))
         else:
             rows = {}
-        snapshots.append((commit[:7], rows))
+        revision = commit[:7]
+        for label, point in credits.get(revision, {}).items():
+            carried[label] = rows[label], point
+        # Carry a credit until the committed table records a different score for that area.
+        for label, (previous, credited) in list(carried.items()):
+            if rows.get(label) == previous:
+                rows[label] = credited
+            else:
+                del carried[label]
+        snapshots.append((revision, rows))
 
     first_recorded = next((i for i, (_, rows) in enumerate(snapshots) if rows), len(snapshots))
     snapshots = snapshots[first_recorded:]
     if not committed_only:
-        working_tree = progress((ROOT / "README.md").read_text(encoding="utf-8"))
+        working_tree = progress(current_readme)
         if not snapshots or working_tree != snapshots[-1][1]:
             snapshots.append(("Working tree", working_tree))
     return snapshots
@@ -80,7 +113,7 @@ def draw(snapshots, output):
     figure.subplots_adjust(left=0.085, right=0.695, bottom=0.20, top=0.73)
     figure.text(0.04, 0.92, "Formalization progress", fontsize=25, weight="bold", color=INK)
     commit_count = len(snapshots) - (snapshots[-1][0] == "Working tree")
-    figure.text(0.04, 0.86, f"Recorded README percentages across {commit_count} mainline commits",
+    figure.text(0.04, 0.86, f"Recorded milestone percentages across {commit_count} mainline commits",
                 fontsize=12, color=MUTED)
     handles = [
         Line2D([], [], color=color, marker=marker, linestyle="none", label=name)
