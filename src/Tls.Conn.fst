@@ -202,8 +202,12 @@ val check_cfin : st:stb -> inner:ibuf{B.length inner = 16640} -> out:ibuf{B.leng
          (S.index (B.as_seq h1 res) 3 == 0ul <==>
            S.slice (B.as_seq h0 inner) 4 36 == verify_data)) /\
         phase_at h1 st ==
-          (if S.index (B.as_seq h1 res) 3 = 0ul then 2uy else phase_at h0 st))
+          (if S.index (B.as_seq h1 res) 3 = 0ul then 2uy else phase_at h0 st) /\
+        (S.index (B.as_seq h1 res) 3 = 0ul ==>
+          keys_installed (B.as_seq h1 st) 136 168 180 (B.get h0 st 245) (state_slice h0 st 248 32)))
+#push-options "--split_queries always"
 let check_cfin st inner out res consumed =
+  let h0 = get () in
   push_frame ();
   let th = B.alloca 0uy 32ul in
   let chs = B.alloca 0uy 32ul in
@@ -218,9 +222,14 @@ let check_cfin st inner out res consumed =
   if good then begin
     S.lemma_eq_intro (B.as_seq h ex) (B.as_seq h got);
     install_client_app st;
+    let installed = get () in
     B.upd st o_phase 2uy;
+    let connected = get () in
+    preserve_installed_keys (B.as_seq installed st) (B.as_seq connected st) 0 1 136 168 180
+      (B.get h0 st 245) (state_slice h0 st 248 32);
     set_res res consumed 0ul 0ul 0ul
   end else fatal st 51uy out res consumed
+#pop-options
 
 val phase1 : st:stb -> inp:ibuf -> rtype:U8.t -> rlen:U32.t{U32.v rlen <= 16640 /\ 5 + U32.v rlen <= B.length inp}
   -> out:ibuf{B.length out = 20480} -> res:resb

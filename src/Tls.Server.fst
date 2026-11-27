@@ -93,7 +93,53 @@ let ecdh_part epub shared rnd peer =
   pop_frame ();
   r
 
-(* second half of the handshake: after the ServerHello is in the transcript *)
+noextract let flight_result (before after:state_bytes)
+    (incoming:Spec.bytes{S.length incoming <= 20480}) (messages:Spec.bytes{S.length messages <= 20480})
+    (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
+    (plain:Spec.bytes{S.length plain <= 12300}) (wire:Spec.bytes) : prop =
+  let suite = S.index before (U32.v o_suite) in
+  let th = Spec.sha256 messages in
+  let ms = S.slice before 72 104 in
+  Spec.matches_server_flight incoming (S.slice before 40 72) alpn chain plain /\
+  messages == S.append incoming plain /\
+  wire == Spec.sealed_record suite (S.slice before 188 220) (S.slice before 220 232)
+    (S.slice before 232 240) 22uy plain /\
+  S.index after (U32.v o_phase) == 1uy /\ S.index after (U32.v o_suite) == suite /\
+  S.slice after 8 104 == S.slice before 8 104 /\
+  S.slice after 136 188 == S.slice before 136 188 /\
+  S.slice after 104 136 == th /\
+  S.slice after 248 280 == Spec.derive_secret ms (Spec.lit_bytes "c ap traffic") th /\
+  keys_installed after 188 220 232 suite (Spec.derive_secret ms (Spec.lit_bytes "s ap traffic") th)
+
+[@@"opaque_to_smt"]
+noextract let completed_flight (before after:state_bytes)
+    (incoming:Spec.bytes{S.length incoming <= 20480}) (messages:Spec.bytes{S.length messages <= 20480})
+    (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000}) (wire:Spec.bytes) : prop =
+  exists (plain:Spec.bytes{S.length plain <= 12300}).
+    flight_result before after incoming messages alpn chain plain wire
+
+let certify_flight (before after:state_bytes)
+    (incoming:Spec.bytes{S.length incoming <= 20480}) (messages:Spec.bytes{S.length messages <= 20480})
+    (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
+    (plain:Spec.bytes{S.length plain <= 12300}) (wire:Spec.bytes)
+  : Lemma (requires flight_result before after incoming messages alpn chain plain wire)
+          (ensures completed_flight before after incoming messages alpn chain wire) =
+  FStar.Classical.exists_intro (fun p -> flight_result before after incoming messages alpn chain p wire) plain;
+  reveal_opaque (`%completed_flight) (completed_flight before after incoming messages alpn chain wire)
+
+let flight_preserves_traffic_state (before after:state_bytes)
+  : Lemma (requires flight_state_preserved before after)
+          (ensures S.slice before 72 104 == S.slice after 72 104 /\
+                   S.slice before 188 220 == S.slice after 188 220 /\
+                   S.slice before 220 232 == S.slice after 220 232 /\
+                   S.slice before 232 240 == S.slice after 232 240 /\
+                   S.index before 245 == S.index after 245) =
+  S.lemma_eq_intro (S.slice before 72 104) (S.slice after 72 104);
+  S.lemma_eq_intro (S.slice before 188 220) (S.slice after 188 220);
+  S.lemma_eq_intro (S.slice before 220 232) (S.slice after 220 232);
+  S.lemma_eq_intro (S.slice before 232 240) (S.slice after 232 240)
+
+(* Protect the exact flight added to the transcript before installing application keys. *)
 val flight_part :
      st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96} -> alpn:bool
@@ -101,8 +147,14 @@ val flight_part :
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h out /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st out /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr out /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain out /\ B.disjoint pkey rnd /\ B.disjoint pkey out /\ B.disjoint rnd out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) (B.loc_buffer out)) h0 h1 /\
-        U32.v r <= 20480)
+        U32.v r <= 20480 /\
+        (U32.v r <> 0 ==> U32.v pos <= U32.v r /\
+          S.slice (B.as_seq h1 out) 0 (U32.v pos) == S.slice (B.as_seq h0 out) 0 (U32.v pos) /\
+          completed_flight (B.as_seq h0 st) (B.as_seq h1 st) (transcript h0 st tr) (transcript h1 st tr)
+            alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) (U32.v pos) (U32.v r))))
+#push-options "--split_queries always --z3rlimit 400"
 let flight_part st tr chain clen pkey rnd alpn out pos =
+  let h0 = get () in
   push_frame ();
   let fl = B.alloca 0uy 14000ul in
   let fllen = build_flight st tr chain clen pkey rnd alpn fl in
@@ -111,17 +163,50 @@ let flight_part st tr chain clen pkey rnd alpn out pos =
     else begin
       let fb = B.sub fl 0ul fllen in
       let rb = B.sub out pos (U32.add fllen 22ul) in
+      let built = get () in
+      flight_preserves_traffic_state (B.as_seq h0 st) (B.as_seq built st);
       let n = send_rec st 22uy fb fllen rb in
       if n = 0ul then 0ul
       else begin
+        let sent = get () in
+        B.loc_buffer_mgsub_eq (B.trivial_preorder U8.t) out pos (U32.add fllen 22ul);
+        B.loc_disjoint_loc_buffer_from_to out 0ul pos pos (U32.add pos n);
+        B.modifies_buffer_from_to_elim out 0ul pos
+          (B.loc_union (B.loc_buffer rb) (B.loc_buffer st)) built sent;
+        preserved_state_slice (B.as_seq built st) (B.as_seq sent st) 232 240 72 104;
+        preserved_state_slice (B.as_seq built st) (B.as_seq sent st) 232 240 104 136;
         app_secret st true;
+        let client_app = get () in
+        preserved_state_slice (B.as_seq sent st) (B.as_seq client_app st) 248 280 72 104;
+        preserved_state_slice (B.as_seq sent st) (B.as_seq client_app st) 248 280 104 136;
         app_secret st false;
+        let server_app = get () in
         B.upd st o_phase 1uy;
+        let done_flight = get () in
+        preserve_installed_keys (B.as_seq server_app st) (B.as_seq done_flight st) 0 1 188 220 232
+          (B.get client_app st 245)
+          (Spec.derive_secret (state_slice client_app st 72 32) (Spec.lit_bytes "s ap traffic")
+            (state_slice client_app st 104 32));
+        S.lemma_eq_intro (S.slice (B.as_seq h0 st) 8 104) (S.slice (B.as_seq done_flight st) 8 104);
+        S.lemma_eq_intro (S.slice (B.as_seq h0 st) 136 188) (S.slice (B.as_seq done_flight st) 136 188);
+        S.lemma_eq_intro (S.slice (B.as_seq built st) 104 136) (S.slice (B.as_seq done_flight st) 104 136);
+        S.lemma_eq_intro (S.slice (B.as_seq client_app st) 248 280) (S.slice (B.as_seq done_flight st) 248 280);
+        assert (transcript done_flight st tr == transcript built st tr);
+        assert (B.get done_flight st 245 == B.get h0 st 245 /\ B.get client_app st 245 == B.get h0 st 245);
+        assert (B.as_seq sent rb == S.slice (B.as_seq sent rb) 0 (U32.v n));
+        assert (S.slice (B.as_seq done_flight out) (U32.v pos) (U32.v pos + U32.v n) == B.as_seq sent rb);
+        certify_flight (B.as_seq h0 st) (B.as_seq done_flight st) (transcript h0 st tr) (transcript done_flight st tr)
+          alpn (B.as_seq h0 chain) (B.as_seq built fb) (B.as_seq sent rb);
         U32.add pos n
       end
     end in
+  let h_end = get () in
   pop_frame ();
+  let h_return = get () in
+  assert (B.as_seq h_return st == B.as_seq h_end st /\
+    transcript h_return st tr == transcript h_end st tr /\ B.as_seq h_return out == B.as_seq h_end out);
   res
+#pop-options
 
 (* record negotiated parameters: cipher suite into the connection state, ALPN flag for the caller *)
 val note_hello : st:stb -> ad:B.buffer U8.t{B.length ad = 2} -> suite:U32.t -> alpn:U32.t
@@ -278,6 +363,34 @@ let hello_part st tr rnd inp rlen out ad =
   res
 #pop-options
 
+type hello_checkpoint = {
+  hello_state: state_bytes;
+  hello_messages: (m:Spec.bytes{S.length m <= 20480});
+  hello_wire: Spec.bytes;
+  protected_wire: Spec.bytes;
+}
+
+noextract let handshake_matches (after:state_bytes) (client:Spec.bytes{S.length client <= 4100})
+    (random:Spec.bytes{S.length random = 32}) (messages:Spec.bytes{S.length messages <= 20480}) (alpn:bool)
+    (chain:Spec.bytes{S.length chain <= 12000}) (wire:Spec.bytes) (hello:hello_checkpoint) : prop =
+  established_hello hello.hello_state client random hello.hello_messages hello.hello_wire /\
+  completed_flight hello.hello_state after hello.hello_messages messages alpn chain hello.protected_wire /\
+  wire == S.append hello.hello_wire hello.protected_wire
+
+[@@"opaque_to_smt"]
+noextract let established_handshake (after:state_bytes) (client:Spec.bytes{S.length client <= 4100})
+    (random:Spec.bytes{S.length random = 32}) (messages:Spec.bytes{S.length messages <= 20480}) (alpn:bool)
+    (chain:Spec.bytes{S.length chain <= 12000}) (wire:Spec.bytes) : prop =
+  exists (hello:hello_checkpoint). handshake_matches after client random messages alpn chain wire hello
+
+let certify_handshake (after:state_bytes) (client:Spec.bytes{S.length client <= 4100})
+    (random:Spec.bytes{S.length random = 32}) (messages:Spec.bytes{S.length messages <= 20480}) (alpn:bool)
+    (chain:Spec.bytes{S.length chain <= 12000}) (wire:Spec.bytes) (hello:hello_checkpoint)
+  : Lemma (requires handshake_matches after client random messages alpn chain wire hello)
+          (ensures established_handshake after client random messages alpn chain wire) =
+  FStar.Classical.exists_intro (handshake_matches after client random messages alpn chain wire) hello;
+  reveal_opaque (`%established_handshake) (established_handshake after client random messages alpn chain wire)
+
 val do_ch :
      st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
@@ -286,12 +399,31 @@ val do_ch :
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h inp /\ B.live h out /\ B.live h ad /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st ad /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr inp /\ B.disjoint tr out /\ B.disjoint tr ad /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain inp /\ B.disjoint chain out /\ B.disjoint chain ad /\ B.disjoint pkey rnd /\ B.disjoint pkey inp /\ B.disjoint pkey out /\ B.disjoint pkey ad /\ B.disjoint rnd inp /\ B.disjoint rnd out /\ B.disjoint rnd ad /\ B.disjoint inp out /\ B.disjoint inp ad /\ B.disjoint out ad)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
-                                (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 20480)
+                                (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 20480 /\
+       (U32.v r <> 0 ==> established_handshake (B.as_seq h1 st)
+         (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
+         (transcript h1 st tr) (B.get h1 ad 1 = 1uy) (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 (U32.v r))))
+#push-options "--split_queries always --z3rlimit 400"
 let do_ch st tr chain clen pkey rnd inp rlen out ad =
+  let h0 = get () in
   let pos = hello_part st tr rnd inp rlen out ad in
   if pos = 0ul then 0ul
   else begin
     let a = B.index ad 1ul in
+    let hello = get () in
     let n = flight_part st tr chain clen pkey rnd (a = 1uy) out pos in
-    if n = 0ul then (B.upd ad 0ul 80uy; 0ul) else n
+    if n = 0ul then (B.upd ad 0ul 80uy; 0ul)
+    else begin
+      let h1 = get () in
+      extend (B.as_seq h1 out) (U32.v pos) (U32.v n - U32.v pos)
+        (S.slice (B.as_seq hello out) 0 (U32.v pos)) (S.slice (B.as_seq h1 out) (U32.v pos) (U32.v n));
+      certify_handshake (B.as_seq h1 st) (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen))
+        (S.slice (B.as_seq h0 rnd) 0 32) (transcript h1 st tr) (a = 1uy) (B.as_seq h0 chain)
+        (S.slice (B.as_seq h1 out) 0 (U32.v n))
+        { hello_state = B.as_seq hello st; hello_messages = transcript hello st tr;
+          hello_wire = S.slice (B.as_seq hello out) 0 (U32.v pos);
+          protected_wire = S.slice (B.as_seq h1 out) (U32.v pos) (U32.v n) };
+      n
+    end
   end
+#pop-options

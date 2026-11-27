@@ -367,7 +367,12 @@ let compose_flight
       reveal_opaque (`%Spec.matches_server_flight) (Spec.matches_server_flight incoming secret alpn chain wire);
       ())
 
-(* ---- the whole encrypted flight; also records the CH..Finished transcript hash ---- *)
+(* The plaintext builder only changes the transcript length and stored hash. *)
+noextract let flight_state_preserved (before after:state_bytes) : prop =
+  forall (i:nat). i < 512 /\ (i < 104 \/ 136 <= i) /\ (i < 240 \/ 242 <= i) ==>
+    S.index before i == S.index after i
+
+(* Build the plaintext flight and record the CH..Finished transcript hash. *)
 val build_flight : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96} -> alpn:bool -> fl:ibuf{B.length fl = 14000}
   -> Stack U32.t
@@ -375,6 +380,7 @@ val build_flight : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.l
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) (B.loc_buffer fl)) h0 h1 /\
         U32.v r <= 12300 /\
         (U32.v r <> 0 ==>
+          flight_state_preserved (B.as_seq h0 st) (B.as_seq h1 st) /\
           Spec.matches_server_flight (transcript h0 st tr) (server_hs_secret h0 st)
             alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 fl) 0 (U32.v r)) /\
           transcript h1 st tr == S.append (transcript h0 st tr) (S.slice (B.as_seq h1 fl) 0 (U32.v r)) /\
@@ -432,6 +438,8 @@ let build_flight st tr chain clen pkey rnd alpn fl =
         save32 st o_th th4;
         if t3 && t4 then begin
           let h_end = get () in
+          assert (state_preserved_except (B.as_seq h0 st) (B.as_seq h_post st) 240 242);
+          assert (flight_state_preserved (B.as_seq h0 st) (B.as_seq h_end st));
           S.append_assoc (transcript h0 st tr)
             (S.slice (B.as_seq h_before_fin fl) 0 (U32.v p2)) (B.as_seq h_fin fm);
           assert (stored_trlen (B.as_seq h_end st) == stored_trlen (B.as_seq h_post st));

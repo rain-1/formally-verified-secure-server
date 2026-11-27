@@ -40,6 +40,33 @@ inline_for_extraction let o_aesok : U32.t = 246ul   (* 1 if the CPU supports the
 let stored_trlen (s:S.seq U8.t{S.length s = 512}) : GTot nat =
   U8.v (S.index s 240) + 256 * U8.v (S.index s 241)
 
+type state_bytes = s:Spec.bytes{S.length s = 512}
+
+noextract let state_preserved_except (before after:state_bytes)
+    (lo hi:nat) : prop =
+  forall (i:nat). i < 512 /\ (i < lo \/ hi <= i) ==> S.index before i == S.index after i
+
+let preserved_state_slice (before after:state_bytes)
+    (lo hi:nat) (start:nat) (stop:nat{start <= stop /\ stop <= 512})
+  : Lemma (requires state_preserved_except before after lo hi /\ (stop <= lo \/ hi <= start))
+          (ensures S.slice before start stop == S.slice after start stop) =
+  S.lemma_eq_intro (S.slice before start stop) (S.slice after start stop)
+
+let preserve_state_outside (before after:state_bytes) (lo:nat) (hi:nat{lo <= hi /\ hi <= 512})
+  : Lemma (requires S.slice before 0 lo == S.slice after 0 lo /\
+                    S.slice before hi 512 == S.slice after hi 512)
+          (ensures state_preserved_except before after lo hi) =
+  let equal_at (i:nat) : Lemma
+    (i < 512 /\ (i < lo \/ hi <= i) ==> S.index before i == S.index after i) =
+    if i < lo then begin
+      S.lemma_index_slice before 0 lo i;
+      S.lemma_index_slice after 0 lo i
+    end else if hi <= i && i < 512 then begin
+      S.lemma_index_slice before hi 512 (i - hi);
+      S.lemma_index_slice after hi 512 (i - hi)
+    end in
+  FStar.Classical.forall_intro equal_at
+
 (* Match tr_hash's handling of a length outside the transcript buffer. *)
 let trlen_g (s:S.seq U8.t{S.length s = 512}) : GTot (n:nat{n <= 20480}) =
   let n = stored_trlen s in
@@ -63,7 +90,8 @@ let get_trlen st =
 
 val set_trlen : st:stb -> v:U32.t{U32.v v < 65536} -> Stack unit (requires fun h -> B.live h st)
   (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
-     stored_trlen (B.as_seq h1 st) = U32.v v /\ server_hs_secret h1 st == server_hs_secret h0 st)
+     stored_trlen (B.as_seq h1 st) = U32.v v /\ server_hs_secret h1 st == server_hs_secret h0 st /\
+     state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) 240 242)
 let set_trlen st v =
   let h0 = get () in
   assert_norm (pow2 8 = 256);
@@ -82,6 +110,7 @@ val tr_add : st:stb -> tr:trb -> msg:ibuf -> mlen:U32.t{U32.v mlen = B.length ms
         (let n = stored_trlen (B.as_seq h0 st) in
          ok == (n + U32.v mlen <= 20480)) /\
         server_hs_secret h1 st == server_hs_secret h0 st /\
+        state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) 240 242 /\
         (if ok then
            B.modifies (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) h0 h1 /\
            transcript h1 st tr == S.append (transcript h0 st tr) (B.as_seq h0 msg)
@@ -126,6 +155,7 @@ val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.l
         B.disjoint st plain /\ B.disjoint st out /\ B.disjoint plain out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\
         phase_at h1 st == phase_at h0 st /\
+        state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) 232 240 /\
         (if r = 0ul then B.as_seq h1 st == B.as_seq h0 st
          else U32.v r = U32.v plen + 22 /\
            incremented_prefix (state_slice h0 st (U32.v o_sseq) 8) (state_slice h1 st (U32.v o_sseq) 8) 8 /\
@@ -133,8 +163,9 @@ val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.l
              Spec.sealed_record (S.index (B.as_seq h0 st) (U32.v o_suite))
                (state_slice h0 st (U32.v o_skey) 32) (state_slice h0 st (U32.v o_siv) 12)
                (state_slice h0 st (U32.v o_sseq) 8) ctype (B.as_seq h0 plain)))
-#push-options "--split_queries always --z3rlimit 100"
+#push-options "--split_queries always --z3rlimit 200"
 let send_rec st ctype plain plen out =
+  let h0 = get () in
   push_frame ();
   let key = B.alloca 0uy 32ul in
   let iv = B.alloca 0uy 12ul in
@@ -151,6 +182,8 @@ let send_rec st ctype plain plen out =
         let before = get () in
         B.blit seq 0ul st o_sseq 8ul;
         let after = get () in
+        preserve_state_outside (B.as_seq before st) (B.as_seq after st) 232 240;
+        assert (B.as_seq before st == B.as_seq h0 st);
         S.lemma_index_slice (B.as_seq before st) 0 (U32.v o_sseq) (U32.v o_phase);
         S.lemma_index_slice (B.as_seq after st) 0 (U32.v o_sseq) (U32.v o_phase)
       end;
@@ -221,7 +254,7 @@ val save32 : st:stb -> off:U32.t{U32.v off + 32 <= 512} -> src:ibuf{B.length src
   -> Stack unit (requires fun h -> B.live h st /\ B.live h src /\ B.disjoint st src)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
         S.slice (B.as_seq h1 st) (U32.v off) (U32.v off + 32) == B.as_seq h0 src /\
-        (forall (i:nat). i < 512 /\ (i < U32.v off \/ i >= U32.v off + 32) ==> S.index (B.as_seq h1 st) i == S.index (B.as_seq h0 st) i))
+        state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) (U32.v off) (U32.v off + 32))
 #push-options "--fuel 2 --z3rlimit 400"
 let save32 st off src =
   let h0 = get () in

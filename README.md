@@ -14,7 +14,7 @@ Percentages count completed modules, test cases, or equally weighted roadmap mil
 |---|---|---|---|
 | Low\* memory safety | 🏁 **100%** (21/21 modules) | All core modules verified for bounds, lifetimes, and arithmetic safety under their contracts. | |
 | HTTP functional correctness | 🏁 **100%** (6/6 milestones) | Path normalization, lookup and routing, parser bounds, header-budget rejection, request-header grammar, and response serialization with exact `Content-Type` selection. [HTTP proofs](docs/PROOFS.md#http-core-srchttpfst) | |
-| TLS functional correctness | 🟢 **80%** (8/10 milestones) | Exact ClientHello and ServerHello transcript and handshake key derivation, encrypted server flight sequencing, Finished verification, CertificateVerify signing input, application-data gating, and record sealing and opening against AEAD contracts. ChaCha20-Poly1305 uses HACL\*’s specification. AES-GCM uses an abstract contract. [TLS proofs](docs/PROOFS.md#tls-13-srctlsfst) | Tie the emitted server flight and installed keys to the transcript checked by client Finished, then prove end-to-end protocol security. |
+| TLS functional correctness | 🟢 **80%** (8/10 milestones) | Exact hello transcript and handshake key installation, encrypted server flight tied to the stored transcript hash and application keys, Finished verification, CertificateVerify signing input, application-data gating, and record sealing and opening against AEAD contracts. ChaCha20-Poly1305 uses HACL\*’s specification. AES-GCM uses an abstract contract. [TLS proofs](docs/PROOFS.md#tls-13-srctlsfst) | Carry the server-flight invariant through the public input path and client Finished. Prove end-to-end protocol security. |
 | ClientHello framing | 🏁 **100%** (5/5 milestones) | EverParse 3D verifies fixed fields, session ID bounds, suite and compression vector lengths, and extension TLV framing against the local grammar. The verified Low\* check requires exact consumption, and parser success implies that the full body matched the grammar under the validator binding. | |
 | Constant-time cryptography | 🟠 **75%** (3/4 milestones) | We use upstream constant-time primitives and scan every Finished MAC byte. GCC and Clang timing checks cover Finished rejection, authenticated record opening, X25519, P-256 signing, and CertificateVerify in a ChaCha20-Poly1305 server flight. Memcheck traces record protection for both suites and CertificateVerify through DER serialization. The record-opening trace shows that the inner content-type scan iterates over the padding. [Timing results](docs/ASSURANCE.md#constant-time-checks) | Study additional CPUs, build settings, TLS paths, and microarchitectural effects. |
 | Current socket test suite | 🏁 **100%** (22/22 tests) | Routing, path confinement, malformed requests, TLS request fragmentation and pipelining, and both TLS suites pass. The matrix varies C optimization and runs a build with ASan/UBSan instrumentation in the C core. | |
@@ -22,13 +22,15 @@ Percentages count completed modules, test cases, or equally weighted roadmap mil
 
 In-process fuzzing checks output bounds across 400,000 HTTP and 100,000 TLS inputs. ASan detects memory errors on exercised paths. UBSan checks selected undefined behavior, including signed overflow.
 
-**Good places to start.** Strengthen `Tls.Server.do_ch` to connect the emitted records, stored transcript hash, and application keys, or repeat the timing checks on another CPU. [TLS handshake](src/Tls.Server.fst) · [Timing checks](docs/ASSURANCE.md#constant-time-checks)
+**Good places to start.** Carry the `Tls.Server.do_ch` invariant through record opening and client Finished in `Tls.Conn`, or repeat the timing checks on another CPU. [TLS connection](src/Tls.Conn.fst) · [Timing checks](docs/ASSURANCE.md#constant-time-checks)
 
 ### Formalization progress by commit
 
 ![Seven formalization metrics on one chart, with a red 0% baseline and markers colored by README status](docs/progress.png)
 
-The chart starts at the first mainline commit with a progress table and labels every mainline commit from there. The separate red 0% baseline is a visual reference. Blue diamonds mark completed areas. Hollow markers show working-tree values when included. The Rust migration expanded the shell roadmap from four to five milestones. Regenerate the published view with `python3 tools/plot_progress.py --committed-only` using Matplotlib.
+The chart plots the milestone counts recorded in each commit’s README. A flat line means the count stayed the same. Recent commits added X25519 timing and Memcheck coverage for record sealing (`d4a3083`), then extended the checks to record opening and CertificateVerify (`7871ffa`). [Assurance results](docs/ASSURANCE.md#constant-time-checks)
+
+The chart starts at the first mainline commit with a progress table. The separate red 0% baseline is a visual reference. Blue diamonds mark completed areas. Hollow markers show working-tree values when included. The Rust migration expanded the shell roadmap from four to five milestones. Regenerate the published view with `python3 tools/plot_progress.py --committed-only` using Matplotlib.
 
 ## Defense in depth
 
