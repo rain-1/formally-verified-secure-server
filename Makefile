@@ -27,6 +27,8 @@ OUT ?= _build/server
 HARDEN := -fstack-protector-strong -fstack-clash-protection -fcf-protection=full -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fPIE
 OPT ?= -O2
 CFLAGS ?= -std=gnu11 $(OPT) -Wall -Wextra -Wno-parentheses $(HARDEN)
+# The trace report identifies reviewed branches by their debug source locations.
+TRACE_DEBUG := $(if $(filter ct-trace,$(MAKECMDGOALS)),-g)
 LDFLAGS ?= -Wl,-z,relro,-z,now,-z,noexecstack
 HACL_SRC := $(addprefix csrc/hacl/,Hacl_AEAD_Chacha20Poly1305.c Hacl_Bignum256.c Hacl_Bignum.c Hacl_Chacha20.c \
   Hacl_Curve25519_51.c Hacl_Hash_Base.c Hacl_Hash_MD5.c Hacl_Hash_SHA1.c Hacl_Hash_SHA2.c Hacl_HKDF.c Hacl_HMAC.c \
@@ -64,7 +66,7 @@ c:
 
 native: c
 	rm -rf _build/native && mkdir -p _build/native
-	cd _build/native && $(CC) $(CFLAGS) $(addprefix -I$(CURDIR)/,$(CORE_INCLUDE_DIRS)) \
+	cd _build/native && $(CC) $(CFLAGS) $(TRACE_DEBUG) $(addprefix -I$(CURDIR)/,$(CORE_INCLUDE_DIRS)) \
 	  -c $(addprefix $(CURDIR)/,$(CORE_SRC))
 	$(AR) rcs _build/native/libsws_core.a _build/native/*.o
 
@@ -110,13 +112,14 @@ timing: server
 
 ct-trace: native
 	$(CC) -std=gnu11 -O2 -g -Wall -Wextra $(addprefix -I,$(CORE_INCLUDE_DIRS)) \
-	  -o _build/ct-trace test/ct_trace.c _build/native/libsws_core.a
+	  -Wl,--wrap=Hacl_P256_ecdsa_sign_p256_sha2 -o _build/ct-trace test/ct_trace.c _build/native/libsws_core.a
 	@status=0; $(VALGRIND) --tool=memcheck --quiet --error-exitcode=99 _build/ct-trace control \
 	  > _build/ct-trace-control.log 2>&1 || status=$$?; \
 	  if [ "$$status" -ne 99 ] || ! grep -q 'Conditional jump or move depends' _build/ct-trace-control.log; then \
 	    cat _build/ct-trace-control.log; exit 1; \
 	  fi
-	$(VALGRIND) --tool=memcheck --track-origins=yes --error-exitcode=99 _build/ct-trace
+	$(VALGRIND) --tool=memcheck --track-origins=yes --xml=yes --xml-file=_build/ct-trace.xml _build/ct-trace
+	python3 test/check_ct_trace.py _build/ct-trace.xml
 
 clean:
 	rm -rf _build

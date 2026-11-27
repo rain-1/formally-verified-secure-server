@@ -20,6 +20,7 @@
 #include "Hacl_P256.h"
 #include "Tls_Conn.h"
 #include "internal/Tls_Conn.h"
+#include "cv_fixture.h"
 
 enum { MAC_LEN = 32, BATCH = 32, WARMUP = 4096 };
 
@@ -252,6 +253,14 @@ static void key_exchange(uint64_t samples)
     report(name, groups, 1);
 }
 
+static void signing_scalar(uint8_t scalar[32], uint8_t mask)
+{
+    for (size_t j = 0; j < 32; j++)
+        scalar[j] = (uint8_t)next() & mask;
+    scalar[0] &= 0x7f;  /* Below the P-256 order. */
+    scalar[31] |= 1;    /* Nonzero. */
+}
+
 static void signing(const char *name, bool vary_nonce, uint64_t samples)
 {
     uint8_t message[130] = {0}, signature[64];
@@ -261,11 +270,7 @@ static void signing(const char *name, bool vary_nonce, uint64_t samples)
 
     for (uint64_t i = 0; i < samples + WARMUP; i++) {
         unsigned group = next() & 1U;
-        uint8_t mask = (uint8_t)(0U - group);
-        for (size_t j = 0; j < sizeof key; j++)
-            scalar[j] = (uint8_t)next() & mask;
-        scalar[0] &= 0x7f;    /* Below the P-256 order. */
-        scalar[31] |= 1;      /* Nonzero. */
+        signing_scalar(scalar, (uint8_t)(0U - group));
 
         unsigned cpu_before, cpu_after;
         uint64_t before = ticks(&cpu_before);
@@ -277,6 +282,116 @@ static void signing(const char *name, bool vary_nonce, uint64_t samples)
         }
         if (i >= WARMUP && cpu_before == cpu_after && after >= before)
             record(&groups[group], (double)(after - before));
+    }
+    report(name, groups, 1);
+}
+
+/* The integer lengths and presence of sign bytes describe the DER encoding path. */
+static uint32_t certificate_verify_shape(const uint8_t *transcript, size_t length)
+{
+    const uint8_t *message = transcript;
+    while (length >= 4) {
+        size_t body = ((size_t)message[1] << 16) | ((size_t)message[2] << 8) | message[3];
+        if (body > length - 4)
+            return 0;
+        if (message[0] == 15) {
+            if (body < 12 || body > 76 || message[4] != 4 || message[5] != 3
+                || message[6] != 0 || message[7] != body - 4)
+                return 0;
+            const uint8_t *der = message + 8;
+            if (der[0] != 0x30 || der[1] != body - 6 || der[2] != 0x02)
+                return 0;
+            unsigned r_len = der[3];
+            if (!r_len || r_len > 33 || body < 11 + r_len || der[4 + r_len] != 0x02)
+                return 0;
+            unsigned s_len = der[5 + r_len];
+            if (!s_len || s_len > 33 || body != 10 + r_len + s_len)
+                return 0;
+            return (r_len << 16) | (s_len << 8) | ((der[4] == 0) << 1) | (der[6 + r_len] == 0);
+        }
+        length -= 4 + body;
+        message += 4 + body;
+    }
+    return 0;
+}
+
+struct cv_trial {
+    uint8_t state[STATE_LEN], transcript[CV_TRANSCRIPT_CAPACITY], hello[CV_HELLO_CAPACITY];
+    uint8_t chain[1], key[32], random[96], out[20480], app[1];
+    uint32_t hello_length, result[4];
+};
+
+struct cv_sample {
+    uint64_t elapsed;
+    uint32_t flight_length, der_shape;
+};
+
+static struct cv_sample cv_sample(struct cv_trial *trial)
+{
+    Tls_Conn_init(trial->state, false);
+    unsigned cpu_before, cpu_after;
+    uint64_t before = ticks(&cpu_before);
+    Tls_Conn_input(trial->state, trial->transcript, trial->chain, sizeof trial->chain, trial->key,
+        trial->random, trial->hello, trial->hello_length, trial->out, trial->app, sizeof trial->app,
+        trial->result);
+    uint64_t after = ticks(&cpu_after);
+
+    size_t length = cv_transcript_length(trial->state);
+    if (trial->state[PHASE] != 1 || trial->result[0] != trial->hello_length || !trial->result[1]
+        || trial->result[2] || trial->result[3] || length > sizeof trial->transcript) {
+        fputs("CertificateVerify timing fixture did not produce a server flight\n", stderr);
+        exit(1);
+    }
+    uint32_t shape = certificate_verify_shape(trial->transcript, length);
+    if (!shape) {
+        fputs("CertificateVerify timing fixture produced invalid framing\n", stderr);
+        exit(1);
+    }
+    uint64_t elapsed = cpu_before == cpu_after && after >= before ? after - before : 0;
+    return (struct cv_sample){elapsed, trial->result[1], shape};
+}
+
+static void certificate_verify(const char *name, bool vary_nonce, uint64_t samples)
+{
+    enum { POOL_SIZE = 128, MAX_CANDIDATES = 4096 };
+    struct cv_trial trial = {.key = {[31] = 42}, .random = {[63] = 7, [95] = 19}};
+    trial.hello_length = read_cv_client_hello(trial.hello);
+    if (!trial.hello_length) {
+        fputs("CertificateVerify timing fixture could not read test/clienthello.bin\n", stderr);
+        exit(1);
+    }
+
+    uint8_t fixed[32], pool[POOL_SIZE][32];
+    uint8_t *scalar = vary_nonce ? trial.random + 64 : trial.key;
+    memcpy(fixed, scalar, sizeof fixed);
+    struct cv_sample reference = cv_sample(&trial);
+    size_t count = 0;
+    for (size_t i = 0; i < MAX_CANDIDATES && count < POOL_SIZE; i++) {
+        signing_scalar(scalar, 0xff);
+        struct cv_sample candidate = cv_sample(&trial);
+        if (candidate.flight_length == reference.flight_length && candidate.der_shape == reference.der_shape)
+            memcpy(pool[count++], scalar, sizeof fixed);
+    }
+    if (count != POOL_SIZE) {
+        fprintf(stderr, "%s: insufficient candidates with matching DER and flight lengths\n", name);
+        exit(1);
+    }
+
+    struct stats groups[2] = {0};
+    for (uint64_t i = 0; i < samples + WARMUP; i++) {
+        unsigned group = next() & 1U;
+        const uint8_t *candidate = pool[next() % POOL_SIZE];
+        uint8_t mask = (uint8_t)(0U - group);
+        for (size_t j = 0; j < sizeof fixed; j++)
+            scalar[j] = (fixed[j] & (uint8_t)~mask) | (candidate[j] & mask);
+
+        struct cv_sample sample = cv_sample(&trial);
+        if (sample.flight_length != reference.flight_length || sample.der_shape != reference.der_shape) {
+            fprintf(stderr, "%s: CertificateVerify output shape changed\n", name);
+            exit(1);
+        }
+        if (i >= WARMUP && sample.elapsed)
+            record(&groups[group], (double)sample.elapsed);
     }
     report(name, groups, 1);
 }
@@ -330,5 +445,7 @@ int main(int argc, char **argv)
     key_exchange(samples / 10);
     signing("P-256 signing key", false, samples / 10);
     signing("P-256 signing nonce", true, samples / 10);
+    certificate_verify("CertificateVerify key", false, samples / 10);
+    certificate_verify("CertificateVerify nonce", true, samples / 10);
     return 0;
 }
