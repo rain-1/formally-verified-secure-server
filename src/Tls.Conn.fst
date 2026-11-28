@@ -58,6 +58,10 @@ let incoming_plaintext (h:HS.mem) (st:stb) (inp:Spec.bytes)
     (state_slice h st (U32.v o_civ) 12) (state_slice h st (U32.v o_cseq) 8)
     (S.slice inp 0 5) (S.slice inp 5 (5 + rlen))
 
+noextract let read_record_ready (h:HS.mem) (st:stb) : prop =
+  record_backend_available (B.get h st (U32.v o_suite)) /\
+  B.get h st (U32.v o_cseq) == 0uy /\ B.get h st (U32.v o_cseq + 1) == 0uy
+
 noextract let inner_type (plain:Spec.bytes) (n:nat) (content_type:U8.t) : prop =
   n < S.length plain /\ S.index plain n == content_type /\ content_type <> 0uy /\
   (forall (j:nat). n < j /\ j < S.length plain ==> S.index plain j == 0uy)
@@ -131,6 +135,8 @@ val open_rec : st:stb -> inp:ibuf -> rlen:U32.t{U32.v rlen >= 17 /\ U32.v rlen <
         S.slice (B.as_seq h1 st) 0 180 == S.slice (B.as_seq h0 st) 0 180 /\
         S.slice (B.as_seq h1 st) 188 512 == S.slice (B.as_seq h0 st) 188 512 /\
         (r == 4294967295ul ==> B.as_seq h1 st == B.as_seq h0 st) /\
+        (read_record_ready h0 st /\ r == 4294967295ul ==>
+           incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) == None) /\
         (r <> 4294967295ul ==>
            incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) ==
              Some (S.slice (B.as_seq h1 inner) 0 (U32.v rlen - 16)) /\
@@ -158,14 +164,36 @@ let open_rec st inp rlen inner ty =
   let il = U32.sub rlen 16ul in
   let innerb = B.sub inner 0ul il in
   let okseq = seq_ok seq in
+  S.lemma_index_slice (B.as_seq h0 st) (U32.v o_cseq) (U32.v o_cseq + 8) 0;
+  S.lemma_index_slice (B.as_seq h0 st) (U32.v o_cseq) (U32.v o_cseq + 8) 1;
+  assert (read_record_ready h0 st ==> okseq);
   let opened =
     if not okseq then false
     else begin
       let suite = B.index st o_suite in
+      let hu = get () in
+      assert (suite == B.get h0 st (U32.v o_suite));
+      assert (B.as_seq hu key == state_slice h0 st (U32.v o_ckey) 32);
+      assert (B.as_seq hu iv == state_slice h0 st (U32.v o_civ) 12);
+      assert (B.as_seq hu seq == state_slice h0 st (U32.v o_cseq) 8);
+      assert (B.as_seq hu hdr == S.slice (B.as_seq h0 inp) 0 5);
+      assert (B.as_seq hu body == S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen));
+      assert (incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) ==
+        decrypt_record suite (B.as_seq hu key) (B.as_seq hu iv) (B.as_seq hu seq)
+          (B.as_seq hu hdr) (B.as_seq hu body));
       let d = unseal key iv seq hdr body rlen innerb suite in
       let hd = get () in
       assert (B.as_seq hd st == B.as_seq h0 st);
-      if d <> 0ul then false
+      if d <> 0ul then begin
+        let rejection () : Lemma (requires read_record_ready h0 st)
+            (ensures incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) == None) =
+          assert (record_backend_available suite);
+          assert (decrypt_record suite (B.as_seq hu key) (B.as_seq hu iv) (B.as_seq hu seq)
+            (B.as_seq hu hdr) (B.as_seq hu body) == None)
+        in
+        FStar.Classical.move_requires rejection ();
+        false
+      end
       else begin
         assert (incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) == Some (B.as_seq hd innerb));
         assert (incremented_prefix (state_slice h0 st (U32.v o_cseq) 8) (B.as_seq hd seq) 8);
@@ -182,6 +210,8 @@ let open_rec st inp rlen inner ty =
     end in
   let before_pop = get () in
   assert (opened == false ==> B.as_seq before_pop st == B.as_seq h0 st);
+  assert (opened == false /\ read_record_ready h0 st ==>
+    incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) == None);
   assert (S.slice (B.as_seq h0 st) 0 180 == S.slice (B.as_seq before_pop st) 0 180 /\
           S.slice (B.as_seq h0 st) 188 512 == S.slice (B.as_seq before_pop st) 188 512);
   assert (opened == true ==> incoming_plaintext h0 st (B.as_seq h0 inp) (U32.v rlen) ==
@@ -204,7 +234,7 @@ let open_rec st inp rlen inner ty =
 (* The result fields identify both the input record and the emitted flight.
    The ALPN choice is witnessed by do_ch's internal result. *)
 noextract let reported_server_flight (h0 h1:HS.mem) (st:stb) (tr:trb)
-    (chain:ibuf{B.length chain <= 12000}) (rnd:ibuf{B.length rnd = 96})
+    (chain:ibuf{B.length chain <= 12000}) (pkey:ibuf{B.length pkey = 32}) (rnd:ibuf{B.length rnd = 96})
     (inp:ibuf) (out:ibuf{B.length out = 20480}) (res:resb) (rlen:nat) : prop =
   let fields = B.as_seq h1 res in
   let written = U32.v (S.index fields 1) in
@@ -215,8 +245,8 @@ noextract let reported_server_flight (h0 h1:HS.mem) (st:stb) (tr:trb)
   phase_at h1 st == 1uy /\
   (exists (alpn:bool).
     established_handshake (B.as_seq h1 st) (B.get h0 st (U32.v o_aesok) = 1uy)
-      (S.slice (B.as_seq h0 inp) 5 (5 + rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
-      (transcript h1 st tr) alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 written))
+      (S.slice (B.as_seq h0 inp) 5 (5 + rlen)) (B.as_seq h0 rnd)
+      (transcript h1 st tr) alpn (B.as_seq h0 chain) (B.as_seq h0 pkey) (S.slice (B.as_seq h1 out) 0 written))
 
 val run_ch : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
@@ -227,8 +257,11 @@ val run_ch : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length 
      (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
                                 (B.loc_union (B.loc_buffer out) (B.loc_buffer res))) h0 h1 /\
         result_bounds (B.as_seq h1 res) (5 + U32.v rlen) 0 /\
+        (server_flight_ready (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen))
+          (B.get h0 st (U32.v o_aesok) = 1uy) (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==>
+          S.index (B.as_seq h1 res) 3 == 0ul) /\
         (S.index (B.as_seq h1 res) 3 == 0ul ==>
-          reported_server_flight h0 h1 st tr chain rnd inp out res (U32.v rlen)))
+          reported_server_flight h0 h1 st tr chain pkey rnd inp out res (U32.v rlen)))
 #push-options "--split_queries always --z3rlimit 300"
 let run_ch st tr chain clen pkey rnd inp rlen out res =
   let h0 = get () in
@@ -247,11 +280,19 @@ let run_ch st tr chain clen pkey rnd inp rlen out res =
       B.as_seq h1 out == B.as_seq hf out);
     FStar.Classical.exists_intro
       (fun alpn -> established_handshake (B.as_seq h1 st) (B.get h0 st (U32.v o_aesok) = 1uy)
-        (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
-        (transcript h1 st tr) alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 (U32.v r)))
+        (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (B.as_seq h0 rnd)
+        (transcript h1 st tr) alpn (B.as_seq h0 chain) (B.as_seq h0 pkey) (S.slice (B.as_seq h1 out) 0 (U32.v r)))
       (B.get hf ad 1 = 1uy)
   end
 #pop-options
+
+noextract let client_hello_record_ready (h:HS.mem) (st:stb) (inp:Spec.bytes) (rtype:U8.t)
+    (rlen:nat{5 + rlen <= S.length inp})
+    (chain:Spec.bytes{S.length chain <= 12000}) (key:Spec.bytes{S.length key = 32})
+    (rnd:Spec.bytes{S.length rnd = 96}) : prop =
+  rtype == 22uy /\ 4 <= rlen /\ rlen <= 4100 /\
+  S.index inp 5 == 1uy /\ read_be24 inp 6 == rlen - 4 /\
+  server_flight_ready (S.slice inp 5 (5 + rlen)) (B.get h st (U32.v o_aesok) = 1uy) chain key rnd
 
 val phase0 : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
@@ -262,10 +303,12 @@ val phase0 : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length 
      (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
                                 (B.loc_union (B.loc_buffer out) (B.loc_buffer res))) h0 h1 /\
         result_bounds (B.as_seq h1 res) (5 + U32.v rlen) 0 /\
+        (client_hello_record_ready h0 st (B.as_seq h0 inp) rtype (U32.v rlen)
+          (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==> S.index (B.as_seq h1 res) 3 == 0ul) /\
         (S.index (B.as_seq h1 res) 3 == 0ul ==>
           rtype == 22uy /\ U32.v rlen >= 4 /\ S.index (B.as_seq h0 inp) 5 == 1uy /\
           read_be24 (B.as_seq h0 inp) 6 == U32.v rlen - 4 /\
-          reported_server_flight h0 h1 st tr chain rnd inp out res (U32.v rlen)))
+          reported_server_flight h0 h1 st tr chain pkey rnd inp out res (U32.v rlen)))
 let phase0 st tr chain clen pkey rnd inp rtype rlen out res =
   let consumed = U32.add 5ul rlen in
   if rtype = 21uy then set_res res consumed 0ul 0ul 2ul
@@ -294,6 +337,16 @@ noextract let authenticated_client_finished (h:HS.mem) (st:stb) (input:Spec.byte
        S.index plain 0 == 20uy /\ read_be24 plain 1 == 32 /\
        S.slice plain 4 36 == expected_client_verify_data (B.as_seq h st) /\
        inner_type plain 36 22uy)
+
+noextract let client_finished_ready (h:HS.mem) (st:stb) (input:Spec.bytes)
+    (rlen:nat{rlen <= 16640 /\ 5 + rlen <= S.length input}) : prop =
+  read_record_ready h st /\ authenticated_client_finished h st input rlen
+
+private let unique_inner_type (plain:Spec.bytes) (a b:nat) (ta tb:U8.t)
+    : Lemma (requires inner_type plain a ta /\ inner_type plain b tb)
+            (ensures a == b /\ ta == tb) =
+  if a < b then assert (S.index plain b == 0uy)
+  else if b < a then assert (S.index plain a == 0uy)
 
 noextract let client_finished_result (before after:state_bytes) (result:S.seq U32.t{S.length result = 4})
     (consumed:nat) : prop =
@@ -354,6 +407,8 @@ val phase1 : st:stb -> inp:ibuf -> rtype:U8.t -> rlen:U32.t{U32.v rlen <= 16640 
      (requires fun h -> B.live h st /\ B.live h inp /\ B.live h out /\ B.live h res /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st res /\ B.disjoint inp out /\ B.disjoint inp res /\ B.disjoint out res)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_buffer st) (B.loc_union (B.loc_buffer out) (B.loc_buffer res))) h0 h1 /\
         result_bounds (B.as_seq h1 res) (5 + U32.v rlen) 0 /\
+        (rtype == 23uy /\ client_finished_ready h0 st (B.as_seq h0 inp) (U32.v rlen) ==>
+          client_finished_result (B.as_seq h0 st) (B.as_seq h1 st) (B.as_seq h1 res) (5 + U32.v rlen)) /\
         (phase_at h1 st <> phase_at h0 st ==>
           rtype == 23uy /\
           authenticated_client_finished h0 st (B.as_seq h0 inp) (U32.v rlen) /\
@@ -362,6 +417,11 @@ val phase1 : st:stb -> inp:ibuf -> rtype:U8.t -> rlen:U32.t{U32.v rlen <= 16640 
 let phase1 st inp rtype rlen out res =
   let h0 = get () in
   let consumed = U32.add 5ul rlen in
+  let finished_length () : Lemma
+    (client_finished_ready h0 st (B.as_seq h0 inp) (U32.v rlen) ==> 53 <= U32.v rlen) =
+    reveal_opaque (`%authenticated_client_finished)
+      (authenticated_client_finished h0 st (B.as_seq h0 inp) (U32.v rlen)) in
+  finished_length ();
   if rtype = 20uy then begin
     if rlen = 1ul then begin
       let c = B.index inp 5ul in
@@ -376,6 +436,27 @@ let phase1 st inp rtype rlen out res =
     let ty = B.alloca 0uy 1ul in
     let r = open_rec st inp rlen inner ty in
     let opened = get () in
+    let opened_finished () : Lemma
+      (requires client_finished_ready h0 st (B.as_seq h0 inp) (U32.v rlen))
+      (ensures r == 36ul /\ B.get opened ty 0 == 22uy /\ B.get opened inner 0 == 20uy /\
+        read_be24 (B.as_seq opened inner) 1 == 32 /\
+        S.slice (B.as_seq opened inner) 4 36 == expected_client_verify_data (B.as_seq h0 st)) =
+      reveal_opaque (`%authenticated_client_finished)
+        (authenticated_client_finished h0 st (B.as_seq h0 inp) (U32.v rlen));
+      let bytes = B.as_seq opened inner in
+      let len = U32.v rlen - 16 in
+      let plain = S.slice bytes 0 len in
+      assert (r <> 4294967295ul /\ inner_type plain 36 22uy);
+      S.lemma_index_slice bytes 0 len 36;
+      assert (r <> 4294967294ul);
+      S.lemma_index_slice bytes 0 len (U32.v r);
+      unique_inner_type plain 36 (U32.v r) 22uy (B.get opened ty 0);
+      S.lemma_index_slice bytes 0 len 0;
+      S.lemma_index_slice bytes 0 len 1;
+      S.lemma_index_slice bytes 0 len 2;
+      S.lemma_index_slice bytes 0 len 3;
+      S.slice_slice bytes 0 len 4 36 in
+    FStar.Classical.move_requires opened_finished ();
     if r = 4294967295ul then fatal st 20uy out res consumed
     else if r = 4294967294ul then fatal st 10uy out res consumed
     else begin
@@ -391,6 +472,8 @@ let phase1 st inp rtype rlen out res =
           assert (B.get opened st 245 == B.get h0 st 245);
           check_cfin st inner out res consumed;
           let checked = get () in
+          assert (client_finished_ready h0 st (B.as_seq h0 inp) (U32.v rlen) ==>
+            S.index (B.as_seq checked res) 3 == 0ul);
           let certify () : Lemma
             (S.index (B.as_seq checked res) 3 == 0ul ==>
              authenticated_client_finished h0 st (B.as_seq h0 inp) (U32.v rlen) /\
@@ -513,11 +596,23 @@ val input :
            S.index (B.as_seq h0 inp) 5 == 1uy /\
            (let rlen = read_be16 (B.as_seq h0 inp) 3 in
             read_be24 (B.as_seq h0 inp) 6 == rlen - 4 /\
-            reported_server_flight h0 h1 st tr chain rnd inp out res rlen)) /\
+            reported_server_flight h0 h1 st tr chain pkey rnd inp out res rlen)) /\
+        ((phase_at h0 st == 0uy /\ U32.v inlen >= 5 /\
+          (let wire = B.as_seq h0 inp in
+           let rlen = read_be16 wire 3 in
+           rlen <= 16640 /\ 5 + rlen <= U32.v inlen /\
+           client_hello_record_ready h0 st wire (S.index wire 0) rlen
+             (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd))) ==>
+          phase_at h1 st == 1uy /\ S.index (B.as_seq h1 res) 3 == 0ul) /\
         (phase_at h0 st <> 2uy ==>
            S.index (B.as_seq h1 res) 2 == 0ul) /\
         (phase_at h0 st == 2uy ==>
            B.as_seq h1 inp == B.as_seq h0 inp /\ application_input_result h0 h1 st inp out app res) /\
+        ((phase_at h0 st == 1uy /\ U32.v inlen >= 5 /\ S.index (B.as_seq h0 inp) 0 == 23uy /\
+          (let rlen = read_be16 (B.as_seq h0 inp) 3 in
+           rlen <= 16640 /\ 5 + rlen <= U32.v inlen /\
+           client_finished_ready h0 st (B.as_seq h0 inp) rlen)) ==>
+          phase_at h1 st == 2uy) /\
         (phase_at h0 st == 1uy /\ phase_at h1 st <> 1uy ==>
            U32.v inlen >= 5 /\ S.index (B.as_seq h0 inp) 0 == 23uy /\
            (let rlen = read_be16 (B.as_seq h0 inp) 3 in

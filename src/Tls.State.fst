@@ -113,6 +113,7 @@ val tr_add : st:stb -> tr:trb -> msg:ibuf -> mlen:U32.t{U32.v mlen = B.length ms
         state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) 240 242 /\
         (if ok then
            B.modifies (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) h0 h1 /\
+           stored_trlen (B.as_seq h1 st) == stored_trlen (B.as_seq h0 st) + U32.v mlen /\
            transcript h1 st tr == S.append (transcript h0 st tr) (B.as_seq h0 msg)
          else h0 == h1))
 let tr_add st tr msg mlen =
@@ -154,12 +155,17 @@ noextract let outgoing_record (h:HS.mem) (st:stb) (ctype:U8.t)
 
 (* Protect and emit one record with the server's write keys. A zero result
    indicates sequence exhaustion or an encryption error. *)
+noextract let write_record_ready (state:state_bytes) : prop =
+  S.index state (U32.v o_sseq) == 0uy /\ S.index state (U32.v o_sseq + 1) == 0uy /\
+  record_backend_available (S.index state (U32.v o_suite))
+
 val send_rec : st:stb -> ctype:U8.t -> plain:ibuf -> plen:U32.t{U32.v plen = B.length plain /\ U32.v plen <= 16384}
   -> out:ibuf{B.length out >= U32.v plen + 22}
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h plain /\ B.live h out /\
         B.disjoint st plain /\ B.disjoint st out /\ B.disjoint plain out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_buffer out) (B.loc_buffer st)) h0 h1 /\
+        (r <> 0ul <==> write_record_ready (B.as_seq h0 st)) /\
         phase_at h1 st == phase_at h0 st /\
         state_preserved_except (B.as_seq h0 st) (B.as_seq h1 st) 232 240 /\
         (if r = 0ul then B.as_seq h1 st == B.as_seq h0 st
@@ -177,9 +183,14 @@ let send_rec st ctype plain plen out =
   B.blit st o_siv iv 0ul 12ul;
   B.blit st o_sseq seq 0ul 8ul;
   let ok = seq_ok seq in
+  S.lemma_index_slice (B.as_seq h0 st) (U32.v o_sseq) (U32.v o_sseq + 8) 0;
+  S.lemma_index_slice (B.as_seq h0 st) (U32.v o_sseq) (U32.v o_sseq + 8) 1;
+  assert (write_record_ready (B.as_seq h0 st) <==>
+    ok /\ record_backend_available (B.get h0 st (U32.v o_suite)));
   let r =
     if ok then begin
       let suite = B.index st o_suite in
+      assert (suite == B.get h0 st (U32.v o_suite));
       let n = seal key iv seq ctype plain plen out suite in
       if n <> 0ul then begin
         let before = get () in
@@ -263,7 +274,8 @@ let send_alert st level desc out =
 
 (* DER INTEGER from a 32-byte big-endian unsigned value; returns new pos *)
 val first_nz : b:ibuf{B.length b = 32} -> i:U32.t{U32.v i <= 31}
-  -> Stack U32.t (requires fun h -> B.live h b) (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r <= 31 /\ U32.v r >= U32.v i)
+  -> Stack U32.t (requires fun h -> B.live h b)
+     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r == Spec.der_start (B.as_seq h0 b) (U32.v i))
      (decreases (31 - U32.v i))
 let rec first_nz b i =
   if i = 31ul then 31ul
@@ -275,17 +287,44 @@ let rec first_nz b i =
 val der_int : out:ibuf -> pos:U32.t{U32.v pos + 35 <= B.length out} -> src:ibuf{B.length src = 32}
   -> Stack U32.t
      (requires fun h -> B.live h out /\ B.live h src /\ B.disjoint out src)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r <= U32.v pos + 35 /\ U32.v r >= U32.v pos + 3)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer out) h0 h1 /\ U32.v r <= U32.v pos + 35 /\ U32.v r >= U32.v pos + 3 /\
+       S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+         S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (Spec.der_integer (B.as_seq h0 src)))
+#push-options "--split_queries always"
 let der_int out pos src =
+  let h0 = get () in
   let i = first_nz src 0ul in
   let top = B.index src i in
   let pad = if U8.gte top 128uy then 1ul else 0ul in
   let len = U32.sub 32ul i in
-  let p = put_u8 out pos 2uy in
-  let p = put_u8 out p (FStar.Int.Cast.uint32_to_uint8 (U32.add len pad)) in
-  let p = if pad = 1ul then put_u8 out p 0uy else p in
+  let p = append_u8 out pos 2uy in
+  let p = append_u8 out p (FStar.Int.Cast.uint32_to_uint8 (U32.add len pad)) in
+  let p = if pad = 1ul then append_u8 out p 0uy else p in
   let s = B.sub src i len in
-  put_buf out p s len
+  let r = append_buf out p s len in
+  let h1 = get () in
+  let certify_integer () : Lemma
+    (S.slice (B.as_seq h1 out) 0 (U32.v r) ==
+      S.append (S.slice (B.as_seq h0 out) 0 (U32.v pos)) (Spec.der_integer (B.as_seq h0 src))) =
+    let input = B.as_seq h0 src in
+    let prefix = S.slice (B.as_seq h0 out) 0 (U32.v pos) in
+    let magnitude = S.slice input (U32.v i) 32 in
+    let tag = S.create 1 2uy in
+    let length = S.create 1 (U8.uint_to_t (U32.v len + U32.v pad)) in
+    let padding = S.create 1 0uy in
+    assert (B.as_seq h1 s == magnitude);
+    S.lemma_eq_intro (S.slice (B.as_seq h1 s) 0 (U32.v len)) magnitude;
+    S.append_assoc prefix tag length;
+    S.append_assoc prefix (S.append tag length) padding;
+    S.append_assoc prefix (S.append tag length) magnitude;
+    S.append_assoc (S.append tag length) padding magnitude;
+    S.append_assoc prefix (S.append (S.append tag length) padding) magnitude;
+    S.append_assoc tag length magnitude;
+    S.append_assoc tag length (S.append padding magnitude);
+    reveal_opaque (`%Spec.der_integer) (Spec.der_integer input) in
+  certify_integer ();
+  r
+#pop-options
 
 
 (* ---------------- ClientHello -> server flight ---------------- *)

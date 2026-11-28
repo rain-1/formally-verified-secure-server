@@ -13,6 +13,7 @@ module U8 = FStar.UInt8
 module HS = FStar.HyperStack
 module S = FStar.Seq
 module Ch = Tls.ChValid
+module Lit = LowStar.Literal
 open Tls.Util
 
 #set-options "--z3rlimit 300 --fuel 1 --ifuel 1"
@@ -21,6 +22,22 @@ type resb = r:B.buffer U32.t{B.length r = 12}
 (* pr[6]=first supported suite in client order (1=AES-128-GCM, 3=ChaCha20-Poly1305, 0=none);
    pr[9]=client offers ChaCha20-Poly1305, pr[10]=client offers AES-128-GCM *)
 type body = b:ibuf{B.length b <= 8192}
+
+type extension_offers = {
+  x25519: nat;
+  http11: bool;
+  alpn_present: bool;
+  tls13: bool;
+  p256_sha256: bool;
+}
+
+noextract let no_extensions : extension_offers =
+  { x25519 = 0; http11 = false; alpn_present = false; tls13 = false; p256_sha256 = false }
+
+noextract let read_extensions (h:HS.mem) (pr:resb) : GTot extension_offers =
+  { x25519 = U32.v (B.get h pr 3); http11 = (B.get h pr 4 = 1ul);
+    alpn_present = (B.get h pr 5 = 1ul); tls13 = (B.get h pr 7 = 1ul);
+    p256_sha256 = (B.get h pr 8 = 1ul) }
 
 noextract let rec offers_word (s:S.seq U8.t) (stop:nat{stop <= S.length s})
     (pos:nat{pos <= stop}) (word:nat) : GTot bool (decreases (stop - pos)) =
@@ -112,6 +129,7 @@ val read_suite_flags : b:body -> hi:U32.t{U32.v hi <= B.length b} -> i:U32.t{U32
        B.get h pr 9 == 0ul /\ B.get h pr 10 == 0ul)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1 /\
        B.get h1 pr 0 == B.get h0 pr 0 /\ B.get h1 pr 1 == B.get h0 pr 1 /\ B.get h1 pr 2 == B.get h0 pr 2 /\
+       read_extensions h1 pr == read_extensions h0 pr /\
        U32.v (B.get h1 pr 6) == first_suite (B.as_seq h0 b) (U32.v hi) (U32.v i) true /\
        B.get h1 pr 9 == (if offers_word (B.as_seq h0 b) (U32.v hi) (U32.v i) 4867 then 1ul else 0ul) /\
        B.get h1 pr 10 == (if offers_word (B.as_seq h0 b) (U32.v hi) (U32.v i) 4865 then 1ul else 0ul))
@@ -121,10 +139,23 @@ let read_suite_flags b hi i pr =
   if has_u16 b hi i 4867ul then B.upd pr 9ul 1ul else ();
   if has_u16 b hi i 4865ul then B.upd pr 10ul 1ul else ()
 
-(* key_share: entries (group u16, len u16, key) in [i,hi). find x25519 with 32 bytes. returns offset or 0 *)
+(* The first X25519 entry with a complete 32-byte key, within the entries
+   reached by following the declared lengths. Zero means no such entry. *)
+noextract let rec x25519_offset (s:S.seq U8.t) (stop:nat{stop <= S.length s})
+    (pos:nat{pos <= stop}) : GTot (r:nat{r = 0 \/ (pos + 4 <= r /\ r + 32 <= stop)})
+    (decreases (stop - pos)) =
+  if pos + 4 > stop then 0
+  else
+    let key = pos + 4 in
+    let len = read_be16 s (pos + 2) in
+    if key + len > stop then 0
+    else if read_be16 s pos = 29 && len = 32 then key
+    else x25519_offset s stop (key + len)
+
 val scan_ks : b:body -> hi:U32.t{U32.v hi <= B.length b} -> i:U32.t{U32.v i <= U32.v hi}
   -> Stack U32.t (requires fun h -> B.live h b)
-     (ensures fun h0 r h1 -> h0 == h1 /\ (U32.v r = 0 \/ (U32.v r + 32 <= U32.v hi /\ U32.v r >= U32.v i)))
+     (ensures fun h0 r h1 -> h0 == h1 /\
+       U32.v r == x25519_offset (B.as_seq h0 b) (U32.v hi) (U32.v i))
      (decreases (U32.v hi - U32.v i))
 let rec scan_ks b hi i =
   if U32.lt (U32.sub hi i) 4ul then 0ul
@@ -137,11 +168,31 @@ let rec scan_ks b hi i =
     else scan_ks b hi (U32.add d l)
   end
 
-(* ALPN: entries (len u8, name). set pr[4] if "http/1.1" present *)
+noextract let http11_name : l:S.seq U8.t{S.length l = 8} =
+  assert_norm (Lit.is_ascii_string "http/1.1");
+  assert_norm (List.Tot.length (FStar.String.list_of_string "http/1.1") = 8);
+  Lit.u8s_of_ascii_string "http/1.1"
+
+(* The input extent is the declared ALPN list. The scanner stops at the
+   first matching name or at an entry that overruns the list. *)
+noextract let rec offers_http11 (s:S.seq U8.t) (stop:nat{stop <= S.length s})
+    (pos:nat{pos <= stop}) : GTot bool (decreases (stop - pos)) =
+  if pos = stop then false
+  else
+    let name = pos + 1 in
+    let len = U8.v (S.index s pos) in
+    if name + len > stop then false
+    else (len = 8 && S.eq (S.slice s name (name + len)) http11_name) ||
+         offers_http11 s stop (name + len)
+
 val scan_alpn : b:body -> hi:U32.t{U32.v hi <= B.length b} -> i:U32.t{U32.v i <= U32.v hi}
-  -> Stack bool (requires fun h -> B.live h b) (ensures fun h0 _ h1 -> B.modifies B.loc_none h0 h1)
+  -> Stack bool (requires fun h -> B.live h b)
+     (ensures fun h0 found h1 -> B.modifies B.loc_none h0 h1 /\
+       found == offers_http11 (B.as_seq h0 b) (U32.v hi) (U32.v i))
      (decreases (U32.v hi - U32.v i))
+#push-options "--split_queries always"
 let rec scan_alpn b hi i =
+  let h0 = get () in
   if i = hi then false
   else begin
     let l_raw = B.index b i in let l = FStar.Int.Cast.uint8_to_uint32 l_raw in
@@ -149,10 +200,67 @@ let rec scan_alpn b hi i =
     if U32.gt l (U32.sub hi d) then false
     else begin
       let lit, n = LowStar.Literal.buf_len_of_literal "http/1.1" in
-      let hit = if l = n then lit_at b hi d lit n 0ul else false in
+      let h_lit = get () in
+      assert (B.as_seq h_lit b == B.as_seq h0 b /\ B.as_seq h_lit lit == http11_name /\ n == 8ul);
+      let hit : bool = if l = n then lit_at b hi d lit n 0ul else false in
+      let match_name () : Lemma
+        (hit <==> (U32.v l = 8 /\ S.equal (S.slice (B.as_seq h0 b) (U32.v d) (U32.v d + U32.v l)) http11_name)) =
+        if l = n && hit then
+          S.lemma_eq_intro (S.slice (B.as_seq h0 b) (U32.v d) (U32.v d + U32.v l)) http11_name in
+      match_name ();
       if hit then true else scan_alpn b hi (U32.add d l)
     end
   end
+#pop-options
+
+(* Inspect each recognized payload using the local policy. A later key_share
+   extension replaces an earlier selection only if it yields a usable entry. *)
+noextract let inspect_extension (s:S.seq U8.t) (typ:nat) (start:nat)
+    (len:nat{start + len <= S.length s}) (offers:extension_offers) : GTot extension_offers =
+  let stop = start + len in
+  if typ = 43 then
+    if len >= 1 then
+      let size = U8.v (S.index s start) in
+      if size + 1 = len && size % 2 = 0 && offers_word s stop (start + 1) 772
+      then { offers with tls13 = true }
+      else offers
+    else offers
+  else if typ = 13 then
+    if len >= 2 && read_be16 s start + 2 = len && offers_word s stop (start + 2) 1027
+    then { offers with p256_sha256 = true }
+    else offers
+  else if typ = 51 then
+    if len >= 2 && read_be16 s start + 2 = len then
+      let key = x25519_offset s stop (start + 2) in
+      if key <> 0 then { offers with x25519 = key } else offers
+    else offers
+  else if typ = 16 then
+    { offers with alpn_present = true;
+      http11 = offers.http11 ||
+        (len >= 2 && read_be16 s start + 2 = len && offers_http11 s stop (start + 2)) }
+  else offers
+
+[@@"opaque_to_smt"]
+noextract let rec gather_extensions (s:S.seq U8.t) (stop:nat{stop <= S.length s})
+    (pos:nat{pos <= stop}) (offers:extension_offers) : GTot extension_offers
+    (decreases (stop - pos)) =
+  if pos + 4 > stop then offers
+  else
+    let typ = read_be16 s pos in
+    let len = read_be16 s (pos + 2) in
+    let start = pos + 4 in
+    if start + len > stop then offers
+    else gather_extensions s stop (start + len) (inspect_extension s typ start len offers)
+
+noextract let extension_start (s:S.seq U8.t) : GTot (pos:nat{pos <= S.length s}) =
+  let (| _, suites_end |) = suite_bounds s in
+  if suites_end = S.length s then S.length s
+  else
+    let pos = suites_end + 3 + U8.v (S.index s suites_end) in
+    if pos <= S.length s then pos else S.length s
+
+noextract let client_extensions (s:S.seq U8.t) : GTot extension_offers =
+  gather_extensions s (S.length s) (extension_start s) no_extensions
 
 noextract let preserves_hello_fields (h0 h1:HS.mem) (pr:resb) : prop =
   B.get h1 pr 1 == B.get h0 pr 1 /\ B.get h1 pr 2 == B.get h0 pr 2 /\
@@ -162,7 +270,10 @@ val do_ext : b:body -> typ:U32.t -> d:U32.t -> l:U32.t{U32.v d + U32.v l <= B.le
   -> Stack unit
      (requires fun h -> B.live h b /\ B.live h pr /\ B.disjoint b pr)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1 /\
-       B.get h1 pr 0 == B.get h0 pr 0 /\ preserves_hello_fields h0 h1 pr)
+       B.get h1 pr 0 == B.get h0 pr 0 /\ preserves_hello_fields h0 h1 pr /\
+       read_extensions h1 pr == inspect_extension (B.as_seq h0 b) (U32.v typ) (U32.v d) (U32.v l)
+         (read_extensions h0 pr))
+#push-options "--split_queries always"
 let do_ext b typ d l pr =
   let e = U32.add d l in
   if typ = 43ul then begin
@@ -197,11 +308,13 @@ let do_ext b typ d l pr =
       end else ()
     end else ()
   end else ()
+#pop-options
 
 val scan_ext : b:body -> hi:U32.t{U32.v hi <= B.length b} -> p:U32.t{U32.v p <= U32.v hi} -> pr:resb
   -> Stack unit
      (requires fun h -> B.live h b /\ B.live h pr /\ B.disjoint b pr)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1 /\ preserves_hello_fields h0 h1 pr /\
+       read_extensions h1 pr == gather_extensions (B.as_seq h0 b) (U32.v hi) (U32.v p) (read_extensions h0 pr) /\
        (Ch.extension_vector (B.as_seq h0 b) (U32.v hi) (U32.v p) ==>
           B.get h1 pr 0 == B.get h0 pr 0) /\
        (~ (Ch.extension_vector (B.as_seq h0 b) (U32.v hi) (U32.v p)) ==> B.get h1 pr 0 == 0ul))
@@ -210,6 +323,8 @@ val scan_ext : b:body -> hi:U32.t{U32.v hi <= B.length b} -> p:U32.t{U32.v p <= 
 let rec scan_ext b hi p pr =
   let h0 = get () in
   reveal_opaque (`%Ch.extension_vector) (Ch.extension_vector (B.as_seq h0 b) (U32.v hi) (U32.v p));
+  reveal_opaque (`%gather_extensions)
+    (gather_extensions (B.as_seq h0 b) (U32.v hi) (U32.v p) (read_extensions h0 pr));
   if p = hi then ()
   else if U32.lt (U32.sub hi p) 4ul then B.upd pr 0ul 0ul
   else begin
@@ -229,7 +344,8 @@ noextract let parsed_offers (h0 h1:HS.mem) (b:body) (pr:resb) : prop =
   U32.v (B.get h1 pr 2) == U8.v (B.get h0 b 34) /\
   U32.v (B.get h1 pr 6) == client_suite (B.as_seq h0 b) true /\
   B.get h1 pr 9 == (if client_offers (B.as_seq h0 b) 4867 then 1ul else 0ul) /\
-  B.get h1 pr 10 == (if client_offers (B.as_seq h0 b) 4865 then 1ul else 0ul)
+  B.get h1 pr 10 == (if client_offers (B.as_seq h0 b) 4865 then 1ul else 0ul) /\
+  read_extensions h1 pr == client_extensions (B.as_seq h0 b)
 
 (* Keep the byte-range checks in the executable while proving that a
    successful framing check discharges them. *)
@@ -237,7 +353,7 @@ private inline_for_extraction
 val parse_framed : b:body -> bl:U32.t{U32.v bl = B.length b} -> pr:resb
   -> Stack unit
      (requires fun h -> B.live h b /\ B.live h pr /\ B.disjoint b pr /\ Ch.valid_body (B.as_seq h b) /\
-       B.get h pr 0 == 1ul /\ B.get h pr 9 == 0ul /\ B.get h pr 10 == 0ul)
+       B.get h pr 0 == 1ul /\ B.get h pr 9 == 0ul /\ B.get h pr 10 == 0ul /\ read_extensions h pr == no_extensions)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer pr) h0 h1 /\
        B.get h1 pr 0 == 1ul /\ parsed_offers h0 h1 b pr)
 #push-options "--split_queries always"
@@ -290,6 +406,8 @@ let parse_framed b bl pr =
                   assert (B.as_seq entering_extensions b == B.as_seq h0 b);
                   assert (preserves_hello_fields after_suites entering_extensions pr /\
                     B.get entering_extensions pr 0 == 1ul);
+                  assert (read_extensions entering_extensions pr == no_extensions /\
+                    U32.v es == extension_start (B.as_seq h0 b));
                   assert (Ch.extension_vector (B.as_seq entering_extensions b) (U32.v bl) (U32.v es));
                   scan_ext b bl es pr;
                   let after_extensions = get () in

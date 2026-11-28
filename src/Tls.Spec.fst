@@ -114,6 +114,24 @@ noextract let certificate_verify_message (signature:bytes{S.length signature <= 
   let scheme = S.append (handshake_header 15uy (4 + len)) (u16_be 1027) in
   S.append (S.append scheme (u16_be len)) signature
 
+noextract let rec der_start (n:bytes{S.length n = 32}) (i:nat{i <= 31})
+    : Tot (j:nat{i <= j /\ j <= 31}) (decreases (31 - i)) =
+  if i = 31 || S.index n i <> 0uy then i else der_start n (i + 1)
+
+[@@"opaque_to_smt"]
+noextract let der_integer (n:bytes{S.length n = 32})
+    : encoded:bytes{3 <= S.length encoded /\ S.length encoded <= 35} =
+  let i = der_start n 0 in
+  let magnitude = S.slice n i 32 in
+  let payload = if U8.v (S.index n i) >= 128 then S.append (S.create 1 0uy) magnitude else magnitude in
+  S.append (S.create 1 2uy) (S.append (S.create 1 (U8.uint_to_t (S.length payload))) payload)
+
+[@@"opaque_to_smt"]
+noextract let der_p256_signature (raw:bytes{S.length raw = 64})
+    : encoded:bytes{8 <= S.length encoded /\ S.length encoded <= 72} =
+  let integers = S.append (der_integer (S.slice raw 0 32)) (der_integer (S.slice raw 32 64)) in
+  S.append (S.create 1 48uy) (S.append (S.create 1 (U8.uint_to_t (S.length integers))) integers)
+
 [@@"opaque_to_smt"]
 noextract let finished_message (verify_data:bytes{S.length verify_data = 32})
   : msg:bytes{S.length msg = 36} =
@@ -144,6 +162,16 @@ let traffic_iv (secret:bytes{S.length secret = 32}) : b:bytes{S.length b = 12} =
 
 (* key schedule with no PSK and (EC)DHE = [shared] *)
 let zeros32 : bytes = S.create 32 0uy
+
+[@@"opaque_to_smt"]
+noextract let x25519_public (scalar:bytes{S.length scalar = 32}) : p:bytes{S.length p = 32} =
+  unlift (Spec.Curve25519.secret_to_public (lift scalar))
+
+[@@"opaque_to_smt"]
+noextract let x25519_shared (scalar:bytes{S.length scalar = 32}) (peer:bytes{S.length peer = 32})
+    : p:bytes{S.length p = 32} =
+  unlift (Spec.Curve25519.scalarmult (lift scalar) (lift peer))
+
 let early_secret : bytes = hkdf_extract zeros32 zeros32
 let empty_hash : bytes = sha256 S.empty
 let handshake_secret (shared:bytes{S.length shared = 32}) : b:bytes{S.length b = 32} =
@@ -170,18 +198,47 @@ noextract let server_flight (incoming:bytes{S.length incoming <= 20480})
   let prefix = server_flight_prefix alpn chain signature in
   S.append prefix (finished_message (finished_verify secret (sha256 (S.append incoming prefix))))
 
-[@@"opaque_to_smt"]
-noextract let matches_server_flight (incoming:bytes{S.length incoming <= 20480})
-  (secret:bytes{S.length secret = 32}) (alpn:bool) (chain:bytes{S.length chain <= 12000}) (wire:bytes) : prop =
-  exists (signature:bytes{0 < S.length signature /\ S.length signature <= 74}).
-    wire == server_flight incoming secret alpn chain signature
-
 (* Server CertificateVerify signature input with a SHA-256 transcript hash
    (RFC 8446 section 4.4.3, RFC 9846 section 4.5.2). *)
 let server_cv_input (th:bytes{S.length th = 32}) : input:bytes{S.length input = 130} =
   S.append (S.create 64 32uy)
     (S.append (lit_bytes "TLS 1.3, server CertificateVerify")
       (S.append (S.create 1 0uy) th))
+
+[@@"opaque_to_smt"]
+noextract let p256_sign_sha256
+    (message:bytes{S.length message < pow2 32})
+    (key:bytes{S.length key = 32}) (nonce:bytes{S.length nonce = 32})
+    : option (raw:bytes{S.length raw = 64}) =
+  match Spec.P256.ecdsa_signature_agile (Spec.P256.Hash HD.SHA2_256)
+          (S.length message) (lift message) (lift key) (lift nonce) with
+  | None -> None
+  | Some raw -> Some (unlift raw)
+
+noextract let certificate_verify_signature
+    (messages:bytes{S.length messages <= max_in})
+    (key:bytes{S.length key = 32}) (nonce:bytes{S.length nonce = 32})
+    : option (der:bytes{8 <= S.length der /\ S.length der <= 72}) =
+  match p256_sign_sha256 (server_cv_input (sha256 messages)) key nonce with
+  | None -> None
+  | Some raw -> Some (der_p256_signature raw)
+
+noextract let certificate_signing_nonce (rnd:bytes{S.length rnd = 96}) : nonce:bytes{S.length nonce = 32} =
+  S.slice rnd 64 96
+
+noextract let flight_signature (incoming:bytes{S.length incoming <= 20480}) (alpn:bool)
+    (chain:bytes{S.length chain <= 12000}) (key:bytes{S.length key = 32}) (rnd:bytes{S.length rnd = 96})
+    : option (der:bytes{8 <= S.length der /\ S.length der <= 72}) =
+  certificate_verify_signature (S.append incoming (S.append (encrypted_extensions alpn) (certificate_message chain)))
+    key (certificate_signing_nonce rnd)
+
+[@@"opaque_to_smt"]
+noextract let matches_server_flight (incoming:bytes{S.length incoming <= 20480})
+    (secret:bytes{S.length secret = 32}) (alpn:bool) (chain:bytes{S.length chain <= 12000})
+    (key:bytes{S.length key = 32}) (rnd:bytes{S.length rnd = 96}) (wire:bytes) : prop =
+  match flight_signature incoming alpn chain key rnd with
+  | None -> False
+  | Some signature -> wire == server_flight incoming secret alpn chain signature
 
 (* RFC 8446 section 5.3. The sequence number is already encoded big-endian. *)
 let nonce_byte (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8})

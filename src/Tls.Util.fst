@@ -228,11 +228,15 @@ let rec ct_eq a b n i acc =
     ct_eq a b n (U32.add i 1ul) (U8.logor acc diff)
   end
 
-(* literal at position: true iff b[off..off+l) == lit and off+l <= hi *)
+(* Match the remaining literal bytes. The empty suffix always matches. *)
 val lit_at : b:ibuf -> hi:U32.t{U32.v hi <= B.length b /\ U32.v hi <= 65536} -> off:U32.t{U32.v off <= U32.v hi}
   -> lit:lbuf -> l:U32.t{U32.v l = B.length lit /\ U32.v l <= 65536} -> j:U32.t{U32.v j <= U32.v l}
   -> Stack bool (requires fun h -> B.live h b /\ B.live h lit)
-     (ensures fun h0 _ h1 -> h0 == h1) (decreases (U32.v l - U32.v j))
+     (ensures fun h0 ok h1 -> h0 == h1 /\
+       (ok <==> (j == l \/ (U32.v off + U32.v l <= U32.v hi /\
+         (forall (k:nat{U32.v j <= k /\ k < U32.v l}).
+           S.index (B.as_seq h0 b) (U32.v off + k) == S.index (B.as_seq h0 lit) k)))))
+     (decreases (U32.v l - U32.v j))
 let rec lit_at b hi off lit l j =
   if j = l then true
   else if U32.gte (U32.add off j) hi then false

@@ -10,7 +10,7 @@ A proof is a statement about a model. These are the things the guarantees depend
 
 **Crypto**
 - HACL* / EverCrypt / Vale as vendored in `csrc/hacl` (published proofs, not re-checked here).
-- The assumed contracts in `src/Hacl.*.fst` and `src/EverCrypt.AEAD.fst` link SHA-256, HMAC, HKDF, and ChaCha20-Poly1305 to the vendored HACL* specifications. AES-128-GCM has an abstract functional contract. X25519 and ECDSA P-256 retain memory-level contracts. [Proof scope](PROOFS.md#assumed-trusted-interfaces)
+- The assumed contracts in `src/Hacl.*.fst` link SHA-256, HMAC, HKDF, X25519, ECDSA P-256 signing, and ChaCha20-Poly1305 to the vendored HACL* specifications. The AES-128-GCM contract uses abstract cryptographic operations and models backend availability after EverCrypt initialization. The model assumes the build and CPU feature flags stay fixed during a connection. [Proof scope](PROOFS.md#assumed-trusted-interfaces)
 - Constant-time assurance combines upstream guarantees with scoped timing measurements, machine-code review, and Memcheck traces. The auditor treats observable outcomes such as the Finished match bit as public at the return boundary. Platform-dependent leakage and unexercised paths remain part of the trust assumptions. [Constant-time checks](ASSURANCE.md#constant-time-checks)
 
 **Specifications**

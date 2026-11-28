@@ -119,21 +119,42 @@ let cv_input_eq
 val der_sig : der:ibuf{B.length der = 80} -> sig64:ibuf{B.length sig64 = 64}
   -> Stack U32.t
      (requires fun h -> B.live h der /\ B.live h sig64 /\ B.disjoint der sig64)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer der) h0 h1 /\ U32.v r <= 74)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer der) h0 h1 /\ 8 <= U32.v r /\ U32.v r <= 72 /\
+       S.slice (B.as_seq h1 der) 0 (U32.v r) == Spec.der_p256_signature (B.as_seq h0 sig64))
+#push-options "--split_queries always"
 let der_sig der sig64 =
+  let h0 = get () in
   push_frame ();
   let ints = B.alloca 0uy 80ul in
   let r0 = B.sub sig64 0ul 32ul in
   let s0 = B.sub sig64 32ul 32ul in
+  let before = get () in
+  empty_prefix (B.as_seq before ints);
   let ip = der_int ints 0ul r0 in
+  S.append_empty_l (Spec.der_integer (B.as_seq before r0));
   let ip2 = der_int ints ip s0 in
   let ipc : (x:U32.t{U32.v x <= 70}) = ip2 in
-  let dp = put_u8 der 0ul 48uy in
-  let dp2 = put_u8 der dp (FStar.Int.Cast.uint32_to_uint8 ipc) in
+  empty_prefix (B.as_seq h0 der);
+  S.append_empty_l (S.create 1 48uy);
+  let dp = append_u8 der 0ul 48uy in
+  let dp2 = append_u8 der dp (FStar.Int.Cast.uint32_to_uint8 ipc) in
   let ib = B.sub ints 0ul ipc in
-  let derl = put_buf der dp2 ib ipc in
+  let derl = append_buf der dp2 ib ipc in
+  let done_der = get () in
+  let certify_sequence () : Lemma
+    (S.slice (B.as_seq done_der der) 0 (U32.v derl) == Spec.der_p256_signature (B.as_seq h0 sig64)) =
+    let raw = B.as_seq h0 sig64 in
+    let integers = S.append (Spec.der_integer (S.slice raw 0 32)) (Spec.der_integer (S.slice raw 32 64)) in
+    assert (B.as_seq done_der ib == integers);
+    S.lemma_eq_intro (S.slice (B.as_seq done_der ib) 0 (U32.v ipc)) integers;
+    let tag = S.create 1 48uy in
+    let length = S.create 1 (U8.uint_to_t (S.length integers)) in
+    S.append_assoc tag length integers;
+    reveal_opaque (`%Spec.der_p256_signature) (Spec.der_p256_signature raw) in
+  certify_sequence ();
   pop_frame ();
   derl
+#pop-options
 
 (* returns DER signature length written into der, or 0 on failure *)
 val sign_cv : st:stb -> tr:trb -> pkey:ibuf{B.length pkey = 32} -> nonce:ibuf{B.length nonce = 32}
@@ -141,7 +162,11 @@ val sign_cv : st:stb -> tr:trb -> pkey:ibuf{B.length pkey = 32} -> nonce:ibuf{B.
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h pkey /\ B.live h nonce /\ B.live h der /\
         B.disjoint der st /\ B.disjoint der tr /\ B.disjoint der pkey /\ B.disjoint der nonce)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer der) h0 h1 /\ U32.v r <= 74)
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer der) h0 h1 /\ U32.v r <= 72 /\
+       (U32.v r <> 0 ==> 8 <= U32.v r) /\
+       Spec.certificate_verify_signature (transcript h0 st tr) (B.as_seq h0 pkey) (B.as_seq h0 nonce) ==
+         (if r = 0ul then None else Some (S.slice (B.as_seq h1 der) 0 (U32.v r))))
+#push-options "--split_queries always"
 let sign_cv st tr pkey nonce der =
   let h0 = get () in
   push_frame ();
@@ -164,9 +189,17 @@ let sign_cv st tr pkey nonce der =
     (B.as_seq h sgn) (B.as_seq h th2);
   assert (B.as_seq h sgn == Spec.server_cv_input (Spec.sha256 (transcript h0 st tr)));
   let oks = Hacl.P256.ecdsa_sign_p256_sha2 sig64 130ul sgn pkey nonce in
+  let signed = get () in
+  assert (B.as_seq h pkey == B.as_seq h0 pkey /\ B.as_seq h nonce == B.as_seq h0 nonce);
   let derl = der_sig der sig64 in
+  let encoded = get () in
+  assert (Spec.certificate_verify_signature (transcript h0 st tr) (B.as_seq h0 pkey) (B.as_seq h0 nonce) ==
+    (if oks then Some (Spec.der_p256_signature (B.as_seq signed sig64)) else None));
   pop_frame ();
+  let returned = get () in
+  assert (B.as_seq returned der == B.as_seq encoded der);
   if oks then derl else 0ul
+#pop-options
 
 (* ---- Certificate ---- *)
 let certificate_prefix (prefix wire:Spec.bytes) (chain:Spec.bytes{S.length chain <= 12000})
@@ -226,9 +259,8 @@ let certificate_verify_prefix (prefix wire:Spec.bytes) (signature:Spec.bytes{0 <
          let length = S.append kind (Spec.u24_be (4 + len)) in
          let scheme = S.append length (Spec.u16_be 1027) in
          wire == S.append (S.append scheme (Spec.u16_be len)) (S.slice signature 0 len)))
-      (ensures S.length prefix <= S.length wire /\ S.slice wire 0 (S.length prefix) == prefix /\
-        (exists (sig_bytes:Spec.bytes{S.length sig_bytes = S.length signature}).
-          wire == S.append prefix (Spec.certificate_verify_message sig_bytes))) =
+      (ensures wire == S.append prefix (Spec.certificate_verify_message signature) /\
+        S.length prefix <= S.length wire /\ S.slice wire 0 (S.length prefix) == prefix) =
   let len = S.length signature in
   let hdr = Spec.handshake_header 15uy (4 + len) in
   let scheme = S.append hdr (Spec.u16_be 1027) in
@@ -238,27 +270,35 @@ let certificate_verify_prefix (prefix wire:Spec.bytes) (signature:Spec.bytes{0 <
   S.append_assoc prefix hdr (Spec.u16_be 1027);
   S.append_assoc prefix scheme (Spec.u16_be len);
   S.append_assoc prefix (S.append scheme (Spec.u16_be len)) signature;
-  split_serialized wire prefix (Spec.certificate_verify_message signature);
-  FStar.Classical.exists_intro
-    (fun (s:Spec.bytes{S.length s = len}) -> wire == S.append prefix (Spec.certificate_verify_message s)) signature
+  split_serialized wire prefix (Spec.certificate_verify_message signature)
 
 val add_cv : st:stb -> tr:trb -> fl:ibuf{B.length fl = 14000} -> pos:U32.t{U32.v pos <= 12100}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
   -> Stack U32.t
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h fl /\ B.live h pkey /\ B.live h rnd /\ B.disjoint st tr /\ B.disjoint st fl /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint tr fl /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint fl pkey /\ B.disjoint fl rnd /\ B.disjoint pkey rnd)
-     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer fl) h0 h1 /\ (U32.v r = 0 \/ (U32.v r > U32.v pos + 8 /\ U32.v r <= U32.v pos + 82)) /\
+     (ensures fun h0 r h1 -> B.modifies (B.loc_buffer fl) h0 h1 /\ (U32.v r = 0 \/ (U32.v r > U32.v pos + 8 /\ U32.v r <= U32.v pos + 80)) /\
        (U32.v r <> 0 ==>
-         S.slice (B.as_seq h1 fl) 0 (U32.v pos) == S.slice (B.as_seq h0 fl) 0 (U32.v pos) /\
-         (exists (signature:Spec.bytes{S.length signature = U32.v r - U32.v pos - 8}).
-         S.slice (B.as_seq h1 fl) 0 (U32.v r) ==
-           S.append (S.slice (B.as_seq h0 fl) 0 (U32.v pos)) (Spec.certificate_verify_message signature))))
+         S.slice (B.as_seq h1 fl) 0 (U32.v pos) == S.slice (B.as_seq h0 fl) 0 (U32.v pos)) /\
+       (match Spec.certificate_verify_signature (transcript h0 st tr) (B.as_seq h0 pkey)
+                (Spec.certificate_signing_nonce (B.as_seq h0 rnd)) with
+        | None -> U32.v r == 0
+        | Some signature ->
+          U32.v r == U32.v pos + 8 + S.length signature /\
+          S.slice (B.as_seq h1 fl) 0 (U32.v r) ==
+            S.append (S.slice (B.as_seq h0 fl) 0 (U32.v pos)) (Spec.certificate_verify_message signature)))
 #push-options "--split_queries always"
 let add_cv st tr fl pos pkey rnd =
   let h0 = get () in
   push_frame ();
   let der = B.alloca 0uy 80ul in
   let nonce = B.sub rnd 64ul 32ul in
+  let before_sign = get () in
+  assert (B.as_seq before_sign nonce == Spec.certificate_signing_nonce (B.as_seq h0 rnd));
   let l = sign_cv st tr pkey nonce der in
+  let signed = get () in
+  assert (Spec.certificate_verify_signature (transcript h0 st tr) (B.as_seq h0 pkey)
+      (Spec.certificate_signing_nonce (B.as_seq h0 rnd)) ==
+    (if l = 0ul then None else Some (S.slice (B.as_seq signed der) 0 (U32.v l))));
   let r =
     if l = 0ul then 0ul
     else begin
@@ -270,11 +310,15 @@ let add_cv st tr fl pos pkey rnd =
       let before = get () in
       let stop = append_buf fl q dm l in
       let after = get () in
+      assert (B.as_seq before dm == S.slice (B.as_seq signed der) 0 (U32.v l));
       certificate_verify_prefix (S.slice (B.as_seq h0 fl) 0 (U32.v pos))
         (S.slice (B.as_seq after fl) 0 (U32.v stop)) (B.as_seq before dm);
       stop
     end in
+  let written = get () in
   pop_frame ();
+  let returned = get () in
+  assert (B.as_seq returned fl == B.as_seq written fl);
   r
 #pop-options
 
@@ -319,58 +363,34 @@ let add_fin st tr fl pos =
   r
 #pop-options
 
-[@@"opaque_to_smt"]
-noextract let matches_flight_prefix (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
-  (wire:Spec.bytes) (sig_len:pos{sig_len <= 74}) : prop =
-  exists (signature:Spec.bytes{S.length signature = sig_len}).
-    wire == Spec.server_flight_prefix alpn chain signature
-
-let identify_flight_prefix (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
-  (before_cv wire:Spec.bytes) (sig_len:pos{sig_len <= 74})
-  : Lemma
-      (requires before_cv == S.append (Spec.encrypted_extensions alpn) (Spec.certificate_message chain) /\
-        (exists (signature:Spec.bytes{S.length signature = sig_len}).
-          wire == S.append before_cv (Spec.certificate_verify_message signature)))
-      (ensures matches_flight_prefix alpn chain wire sig_len) =
-  let from_signer (signature:Spec.bytes{S.length signature = sig_len}) =
-    wire == S.append before_cv (Spec.certificate_verify_message signature) in
-  FStar.Classical.exists_elim (matches_flight_prefix alpn chain wire sig_len)
-    #(signature:Spec.bytes{S.length signature = sig_len}) #from_signer ()
-    (fun signature ->
-      FStar.Classical.exists_intro
-        (fun (s:Spec.bytes{S.length s = sig_len}) -> wire == Spec.server_flight_prefix alpn chain s)
-        signature;
-      reveal_opaque (`%matches_flight_prefix) (matches_flight_prefix alpn chain wire sig_len);
-      ())
-
 let compose_flight
     (incoming:Spec.bytes{S.length incoming <= 20480}) (secret:Spec.bytes{S.length secret = 32})
     (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
+    (key:Spec.bytes{S.length key = 32}) (rnd:Spec.bytes{S.length rnd = 96})
     (prefix:Spec.bytes{S.length prefix <= 12200}) (wire:Spec.bytes)
-    (sig_len:pos{sig_len <= 74})
   : Lemma
       (requires
-        matches_flight_prefix alpn chain prefix sig_len /\
+        (match Spec.flight_signature incoming alpn chain key rnd with
+         | None -> False
+         | Some signature -> prefix == Spec.server_flight_prefix alpn chain signature) /\
         wire == S.append prefix (Spec.finished_message
           (Spec.finished_verify secret (Spec.sha256 (S.append incoming prefix)))))
-      (ensures Spec.matches_server_flight incoming secret alpn chain wire) =
-  reveal_opaque (`%matches_flight_prefix) (matches_flight_prefix alpn chain prefix sig_len);
-  let chosen (signature:Spec.bytes{S.length signature = sig_len}) =
-    prefix == Spec.server_flight_prefix alpn chain signature in
-  FStar.Classical.exists_elim (Spec.matches_server_flight incoming secret alpn chain wire)
-    #(signature:Spec.bytes{S.length signature = sig_len}) #chosen ()
-    (fun signature ->
-      reveal_opaque (`%Spec.server_flight) (Spec.server_flight incoming secret alpn chain signature);
-      FStar.Classical.exists_intro
-        (fun (s:Spec.bytes{0 < S.length s /\ S.length s <= 74}) ->
-          wire == Spec.server_flight incoming secret alpn chain s) signature;
-      reveal_opaque (`%Spec.matches_server_flight) (Spec.matches_server_flight incoming secret alpn chain wire);
-      ())
+      (ensures Spec.matches_server_flight incoming secret alpn chain key rnd wire) =
+  reveal_opaque (`%Spec.matches_server_flight) (Spec.matches_server_flight incoming secret alpn chain key rnd wire);
+  match Spec.flight_signature incoming alpn chain key rnd with
+  | None -> ()
+  | Some signature -> reveal_opaque (`%Spec.server_flight) (Spec.server_flight incoming secret alpn chain signature)
 
 (* The plaintext builder only changes the transcript length and stored hash. *)
 noextract let flight_state_preserved (before after:state_bytes) : prop =
   forall (i:nat). i < 512 /\ (i < 104 \/ 136 <= i) /\ (i < 240 \/ 242 <= i) ==>
     S.index before i == S.index after i
+
+noextract let plaintext_flight_ready (state:state_bytes) (incoming:Spec.bytes{S.length incoming <= 20480})
+    (alpn:bool) (chain:Spec.bytes{S.length chain <= 12000})
+    (key:Spec.bytes{S.length key = 32}) (rnd:Spec.bytes{S.length rnd = 96}) : prop =
+  stored_trlen state + S.length chain + 145 <= 20480 /\
+  Some? (Spec.flight_signature incoming alpn chain key rnd)
 
 (* Build the plaintext flight and record the CH..Finished transcript hash. *)
 val build_flight : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
@@ -379,10 +399,12 @@ val build_flight : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.l
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h fl /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st fl /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr fl /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain fl /\ B.disjoint pkey rnd /\ B.disjoint pkey fl /\ B.disjoint rnd fl)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) (B.loc_buffer fl)) h0 h1 /\
         U32.v r <= 12300 /\
+        (plaintext_flight_ready (B.as_seq h0 st) (transcript h0 st tr) alpn
+           (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==> U32.v r <> 0) /\
         (U32.v r <> 0 ==>
           flight_state_preserved (B.as_seq h0 st) (B.as_seq h1 st) /\
           Spec.matches_server_flight (transcript h0 st tr) (server_hs_secret h0 st)
-            alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 fl) 0 (U32.v r)) /\
+            alpn (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) (S.slice (B.as_seq h1 fl) 0 (U32.v r)) /\
           transcript h1 st tr == S.append (transcript h0 st tr) (S.slice (B.as_seq h1 fl) 0 (U32.v r)) /\
           S.slice (B.as_seq h1 st) (U32.v o_th) (U32.v o_th + 32) == Spec.sha256 (transcript h1 st tr)))
 #push-options "--split_queries always"
@@ -393,6 +415,9 @@ let build_flight st tr chain clen pkey rnd alpn fl =
   let eem = B.sub fl 0ul eel in
   let h_ee = get () in
   let t1 = tr_add st tr eem eel in
+  let after_ee = get () in
+  assert (plaintext_flight_ready (B.as_seq h0 st) (transcript h0 st tr) alpn
+    (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==> t1);
   let p1 = add_cert fl eel chain clen in
   let cm = B.sub fl eel (U32.add 8ul clen) in
   let h_cert = get () in
@@ -400,6 +425,7 @@ let build_flight st tr chain clen pkey rnd alpn fl =
     (Spec.certificate_message (B.as_seq h0 chain));
   assert (B.as_seq h_ee eem == Spec.encrypted_extensions alpn);
   assert (B.as_seq h_cert cm == Spec.certificate_message (B.as_seq h0 chain));
+  assert (B.as_seq h_cert st == B.as_seq after_ee st);
   let t2 = tr_add st tr cm (U32.add 8ul clen) in
   let res =
     if not (t1 && t2) then 0ul
@@ -407,20 +433,29 @@ let build_flight st tr chain clen pkey rnd alpn fl =
       let h_cv = get () in
       assert (transcript h_cv st tr ==
         S.append (S.append (transcript h0 st tr) (B.as_seq h_ee eem)) (B.as_seq h_cert cm));
+      assert (stored_trlen (B.as_seq h_cv st) == stored_trlen (B.as_seq h0 st) + U32.v p1);
+      S.append_assoc (transcript h0 st tr) (Spec.encrypted_extensions alpn) (Spec.certificate_message (B.as_seq h0 chain));
+      assert (Spec.flight_signature (transcript h0 st tr) alpn (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==
+        Spec.certificate_verify_signature (transcript h_cv st tr) (B.as_seq h0 pkey) (Spec.certificate_signing_nonce (B.as_seq h0 rnd)));
       let p2 = add_cv st tr fl p1 pkey rnd in
       if p2 = 0ul then 0ul
       else begin
         let cvl = U32.sub p2 p1 in
         let cvm = B.sub fl p1 cvl in
         let h_cv_written = get () in
-        identify_flight_prefix alpn (B.as_seq h0 chain)
-          (S.slice (B.as_seq h_cv fl) 0 (U32.v p1)) (S.slice (B.as_seq h_cv_written fl) 0 (U32.v p2)) (U32.v cvl - 8);
+        let certify_prefix () : Lemma
+          (match Spec.flight_signature (transcript h0 st tr) alpn (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) with
+           | None -> False
+           | Some signature -> S.slice (B.as_seq h_cv_written fl) 0 (U32.v p2) ==
+               Spec.server_flight_prefix alpn (B.as_seq h0 chain) signature) = () in
+        certify_prefix ();
         extend (B.as_seq h_cv_written fl) (U32.v p1) (U32.v cvl)
           (S.slice (B.as_seq h_cv fl) 0 (U32.v p1)) (B.as_seq h_cv_written cvm);
         S.append_assoc (transcript h0 st tr) (B.as_seq h_ee eem) (B.as_seq h_cert cm);
         S.append_assoc (transcript h0 st tr) (S.slice (B.as_seq h_cv fl) 0 (U32.v p1)) (B.as_seq h_cv_written cvm);
         let t3 = tr_add st tr cvm cvl in
         let h_before_fin = get () in
+        assert (t3 ==> stored_trlen (B.as_seq h_before_fin st) == stored_trlen (B.as_seq h0 st) + U32.v p2);
         assert (t3 ==> transcript h_before_fin st tr ==
           S.append (transcript h0 st tr) (S.slice (B.as_seq h_before_fin fl) 0 (U32.v p2)));
         assert (server_hs_secret h_before_fin st == server_hs_secret h0 st);
@@ -444,9 +479,9 @@ let build_flight st tr chain clen pkey rnd alpn fl =
             (S.slice (B.as_seq h_before_fin fl) 0 (U32.v p2)) (B.as_seq h_fin fm);
           assert (stored_trlen (B.as_seq h_end st) == stored_trlen (B.as_seq h_post st));
           assert (transcript h_end st tr == S.append (transcript h0 st tr) (S.slice (B.as_seq h_end fl) 0 (U32.v p3)));
-          compose_flight (transcript h0 st tr) (server_hs_secret h0 st) alpn (B.as_seq h0 chain)
-            (S.slice (B.as_seq h_before_fin fl) 0 (U32.v p2)) (S.slice (B.as_seq h_end fl) 0 (U32.v p3))
-            (U32.v cvl - 8);
+          compose_flight (transcript h0 st tr) (server_hs_secret h0 st) alpn
+            (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd)
+            (S.slice (B.as_seq h_before_fin fl) 0 (U32.v p2)) (S.slice (B.as_seq h_end fl) 0 (U32.v p3));
           p3
         end else 0ul
       end
