@@ -25,7 +25,7 @@
 - If something does go wrong in the process, the sandbox (§3) limits what an attacker can do.
 
 **Not to expect**
-- A protocol security theorem for TLS. The F\* proofs connect the emitted server flight to the stored transcript and keys. Aristotle checked the generated C transition through client Finished under explicit external contracts. Interoperability and negative tests exercise the full handshake. [Aristotle evidence](evidence/aristotle-client-finished.md)
+- A protocol security theorem for TLS. The F\* proofs connect the emitted server flight to the stored transcript and keys. Aristotle checked the generated C transition through client Finished and the CertificateVerify DER encoding and assembly under explicit external contracts. Interoperability and negative tests exercise the full handshake. [Client Finished evidence](evidence/aristotle-client-finished.md) · [CertificateVerify evidence](evidence/aristotle-certverify-der.md)
 - Protection against DoS (slowloris is mitigated by timeouts/limits; floods are for `pf`/the network).
 - Side-channel freedom for the whole server across CPUs, cache conditions, and compiler builds.
 - A proof that the compiled C and Rust match their source semantics (see §4).
