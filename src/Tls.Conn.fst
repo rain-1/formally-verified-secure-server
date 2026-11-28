@@ -214,7 +214,7 @@ noextract let reported_server_flight (h0 h1:HS.mem) (st:stb) (tr:trb)
   S.index fields 2 == 0ul /\ S.index fields 3 == 0ul /\
   phase_at h1 st == 1uy /\
   (exists (alpn:bool).
-    established_handshake (B.as_seq h1 st)
+    established_handshake (B.as_seq h1 st) (B.get h0 st (U32.v o_aesok) = 1uy)
       (S.slice (B.as_seq h0 inp) 5 (5 + rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
       (transcript h1 st tr) alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 written))
 
@@ -246,7 +246,7 @@ let run_ch st tr chain clen pkey rnd inp rlen out res =
     assert (B.as_seq h1 st == B.as_seq hf st /\ transcript h1 st tr == transcript hf st tr /\
       B.as_seq h1 out == B.as_seq hf out);
     FStar.Classical.exists_intro
-      (fun alpn -> established_handshake (B.as_seq h1 st)
+      (fun alpn -> established_handshake (B.as_seq h1 st) (B.get h0 st (U32.v o_aesok) = 1uy)
         (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
         (transcript h1 st tr) alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 (U32.v r)))
       (B.get hf ad 1 = 1uy)

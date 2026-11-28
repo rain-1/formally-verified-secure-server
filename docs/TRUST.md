@@ -15,7 +15,7 @@ A proof is a statement about a model. These are the things the guarantees depend
 
 **Specifications**
 - `src/Http.Spec.fst` and docs/POLICY.md. A wrong specification is proven faithfully. Review these first.
-- The F\* ClientHello binding assumes that the C adapter preserves the heap and returns a bounded grammar-matching prefix on success. Aristotle's C-level result gives evidence for the binding on Linux x86-64 under the stated library and platform contracts. The connection between the Lean grammar and F\*'s abstract `valid_body` is reviewed at the interface. [ClientHello evidence](evidence/aristotle-clienthello-validator.md)
+- The F\* ClientHello binding assumes heap preservation and both directions of exact prefix recognition. Aristotle's C-level result gives evidence for the binding on Linux x86-64 under the stated library and platform contracts. The concrete F\* and Lean grammars are matched by review at the interface. [ClientHello evidence](evidence/aristotle-clienthello-validator.md)
 
 **Unverified code**
 - The Rust shell uses owned file descriptors, checked indexing, and typed buffers. The hand-written C ABI in `shell/src/core.rs` must uphold the Low* contracts. The site loader, Linux syscall wrappers, and sandbox policy remain trusted. The socket suite exercises the combined binary, and ASan/UBSan instrument the C core in the sanitizer build.

@@ -158,6 +158,7 @@ val traffic_secrets : st:stb -> tr:trb -> hs:ibuf{B.length hs = 32}
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h hs /\ B.disjoint st tr /\ B.disjoint st hs /\ B.disjoint tr hs)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
         transcript h1 st tr == transcript h0 st tr /\
+        B.get h1 st (U32.v o_suite) == B.get h0 st (U32.v o_suite) /\
         handshake_keys (B.as_seq h1 st) /\
         S.slice (B.as_seq h1 st) (U32.v o_chs) (U32.v o_chs + 32) ==
           Spec.derive_secret (B.as_seq h0 hs) (Spec.lit_bytes "c hs traffic") (Spec.sha256 (transcript h0 st tr)) /\
@@ -223,6 +224,7 @@ val key_sched : st:stb -> tr:trb -> shared:ibuf{B.length shared = 32}
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h shared /\ B.disjoint st tr /\ B.disjoint st shared /\ B.disjoint tr shared)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer st) h0 h1 /\
         transcript h1 st tr == transcript h0 st tr /\
+        B.get h1 st (U32.v o_suite) == B.get h0 st (U32.v o_suite) /\
         handshake_schedule (B.as_seq h1 st) (B.as_seq h0 shared) (transcript h0 st tr))
 #push-options "--split_queries always"
 let key_sched st tr shared =
@@ -236,6 +238,7 @@ let key_sched st tr shared =
   master_secret ms hs;
   save32 st o_ms ms;
   let hb = get () in
+  assert (B.get hb st (U32.v o_suite) == B.get h0 st (U32.v o_suite));
   preserve_installed_keys (B.as_seq ha st) (B.as_seq hb st) 72 104 136 168 180
     (B.get ha st 245) (state_slice ha st 8 32);
   preserve_installed_keys (B.as_seq ha st) (B.as_seq hb st) 72 104 188 220 232
