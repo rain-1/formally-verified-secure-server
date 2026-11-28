@@ -25,7 +25,7 @@
 - If something does go wrong in the process, the sandbox (§3) limits what an attacker can do.
 
 **Not to expect**
-- A protocol security theorem for TLS. The proofs cover memory safety, the connection between the emitted server flight and the stored transcript and keys, and the Finished computations. Interoperability and negative tests exercise the full handshake through the public input path.
+- A protocol security theorem for TLS. The F\* proofs connect the emitted server flight to the stored transcript and keys. Aristotle checked the generated C transition through client Finished under explicit external contracts. Interoperability and negative tests exercise the full handshake. [Aristotle evidence](evidence/aristotle-client-finished.md)
 - Protection against DoS (slowloris is mitigated by timeouts/limits; floods are for `pf`/the network).
 - Side-channel freedom for the whole server across CPUs, cache conditions, and compiler builds.
 - A proof that the compiled C and Rust match their source semantics (see §4).
@@ -62,7 +62,7 @@ What exists and what it costs, honestly ranked by value for this project:
    C per function (CBMC/SeaHorn on C vs. SMT on lifted code; `llvm-tv`-style for LLVM). Feasible for small pure functions
    (`norm_key`, `scan_ok`), impractical for the whole server; value is mostly for the highest-risk functions.
 4. **Constant-time at binary level:** the timing and Memcheck targets exercise selected native paths from the server build. The comparator also has a machine-code review. See [Constant-time checks](#constant-time-checks).
-5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation use HACL*'s F* specifications. The record proofs cover the TLS framing and AEAD integration. ChaCha20-Poly1305 has a concrete model and the AES-GCM contract is abstract. EverParse validates ClientHello framing. The invariant for the server flight still needs to extend through encrypted client Finished in the public input contract. RFC 8448 traces could independently check the extracted code.
+5. **Spec-to-code gap for TLS:** key derivation and Finished MAC computation use HACL*'s F* specifications. The record proofs cover TLS framing and AEAD integration. ChaCha20-Poly1305 has a concrete F\* model and the AES-GCM contract is abstract. EverParse validates ClientHello framing. Aristotle checks encrypted client Finished on the extracted C under abstract AEAD contracts. A single end-to-end protocol security model and theorem remain open. [Aristotle evidence](evidence/aristotle-client-finished.md)
 
 Recommended order: 1 (extend now) -> 5 (biggest security payoff) -> 2 (if you want gcc out of the TCB) -> 3/4 selectively.
 
