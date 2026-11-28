@@ -148,7 +148,7 @@ val flight_part :
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h out /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st out /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr out /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain out /\ B.disjoint pkey rnd /\ B.disjoint pkey out /\ B.disjoint rnd out)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr)) (B.loc_buffer out)) h0 h1 /\
         U32.v r <= 20480 /\
-        (U32.v r <> 0 ==> U32.v pos <= U32.v r /\
+        (U32.v r <> 0 ==> U32.v pos <= U32.v r /\ phase_at h1 st == 1uy /\
           S.slice (B.as_seq h1 out) 0 (U32.v pos) == S.slice (B.as_seq h0 out) 0 (U32.v pos) /\
           completed_flight (B.as_seq h0 st) (B.as_seq h1 st) (transcript h0 st tr) (transcript h1 st tr)
             alpn (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) (U32.v pos) (U32.v r))))
@@ -400,7 +400,7 @@ val do_ch :
      (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h inp /\ B.live h out /\ B.live h ad /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st ad /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr inp /\ B.disjoint tr out /\ B.disjoint tr ad /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain inp /\ B.disjoint chain out /\ B.disjoint chain ad /\ B.disjoint pkey rnd /\ B.disjoint pkey inp /\ B.disjoint pkey out /\ B.disjoint pkey ad /\ B.disjoint rnd inp /\ B.disjoint rnd out /\ B.disjoint rnd ad /\ B.disjoint inp out /\ B.disjoint inp ad /\ B.disjoint out ad)
      (ensures fun h0 r h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
                                 (B.loc_union (B.loc_buffer out) (B.loc_buffer ad))) h0 h1 /\ U32.v r <= 20480 /\
-       (U32.v r <> 0 ==> established_handshake (B.as_seq h1 st)
+       (U32.v r <> 0 ==> phase_at h1 st == 1uy /\ established_handshake (B.as_seq h1 st)
          (S.slice (B.as_seq h0 inp) 5 (5 + U32.v rlen)) (S.slice (B.as_seq h0 rnd) 0 32)
          (transcript h1 st tr) (B.get h1 ad 1 = 1uy) (B.as_seq h0 chain) (S.slice (B.as_seq h1 out) 0 (U32.v r))))
 #push-options "--split_queries always --z3rlimit 400"

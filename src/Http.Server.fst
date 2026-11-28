@@ -939,6 +939,64 @@ let routed (h1:HS.mem) (req:ibuf) (n:U32.t{B.length req = U32.v n}) (ent:B.buffe
           (forall (j:nat). j < U32.v count /\ entry_in_bounds h1 ent blen j ==>
              ~ (S.equal (entry_key h1 ent blob j) (key_of p)))))))
 
+noextract let routed_response (h:HS.mem) (req out:ibuf) (ent:B.buffer U32.t)
+  (res:res10) (meth:U32.t) : prop =
+  let stop = U32.v (B.get h res 2) in
+  let toff = U32.v (B.get h res 6) in
+  let tlen = U32.v (B.get h res 7) in
+  let close = B.get h res 5 <> 0ul in
+  let e = U32.v (B.get h res 9) in
+  stop <= B.length out /\ toff + tlen <= B.length req /\
+  request_line (B.as_seq h req) meth toff tlen /\
+  first_complete_head (B.as_seq h req) (U32.v (B.get h res 1)) /\
+  (if B.get h res 8 = 1ul then
+     4 * e + 3 < B.length ent /\
+     (let length = B.get h ent (4 * e + 3) in
+      B.get h res 3 == B.get h ent (4 * e + 2) /\
+      B.get h res 4 == (if meth = 1ul then 0ul else length) /\
+      serialized_header (key_of (target_path h req toff tlen)) (B.as_seq h out)
+        stop 200ul length close)
+   else B.get h res 3 == 0ul /\ B.get h res 4 == 0ul /\
+     serialized_header S.empty (B.as_seq h out) stop 404ul 0ul close)
+
+noextract let error_response (h:HS.mem) (req out:ibuf) (res:res10) (st:U32.t) : prop =
+  let stop = U32.v (B.get h res 2) in
+  stop <= B.length out /\
+  (if st = 431ul then
+     B.length req == 8192 /\ B.get h res 1 == 8192ul /\ no_complete_head (B.as_seq h req)
+   else (st == 400ul \/ st == 405ul) /\
+     first_complete_head (B.as_seq h req) (U32.v (B.get h res 1))) /\
+  B.get h res 3 == 0ul /\ B.get h res 4 == 0ul /\ B.get h res 5 == 1ul /\
+  serialized_header S.empty (B.as_seq h out) stop st 0ul true
+
+(* The response header and body metadata describe one wire response. *)
+[@@"opaque_to_smt"]
+noextract let response (h:HS.mem) (req out:ibuf) (ent:B.buffer U32.t) (res:res10) : prop =
+  let ready = B.get h res 0 in
+  let outcome = B.get h res 8 in
+  (ready == 0ul /\ outcome == 0ul /\ B.length req < 8192 /\ no_complete_head (B.as_seq h req)) \/
+  (ready == 1ul /\
+   (if outcome = 1ul || outcome = 2ul then
+      (exists (meth:U32.t). routed_response h req out ent res meth)
+    else outcome == 0ul /\ (exists (st:U32.t). error_response h req out res st)))
+
+let certify_routed_response (h:HS.mem) (req out:ibuf) (ent:B.buffer U32.t)
+  (res:res10) (meth:U32.t)
+  : Lemma
+    (requires B.get h res 0 == 1ul /\ (B.get h res 8 == 1ul \/ B.get h res 8 == 2ul) /\
+              routed_response h req out ent res meth)
+    (ensures response h req out ent res) =
+  reveal_opaque (`%response) (response h req out ent res);
+  FStar.Classical.exists_intro (routed_response h req out ent res) meth
+
+let certify_error_response (h:HS.mem) (req out:ibuf) (ent:B.buffer U32.t)
+  (res:res10) (st:U32.t)
+  : Lemma
+    (requires B.get h res 0 == 1ul /\ B.get h res 8 == 0ul /\ error_response h req out res st)
+    (ensures response h req out ent res) =
+  reveal_opaque (`%response) (response h req out ent res);
+  FStar.Classical.exists_intro (error_response h req out res) st
+
 (* Normalize the target and look it up.
    r = 4294967295: no entry (invalid path, or no entry with that key);  r < count: the entry. *)
 val route :
@@ -960,7 +1018,10 @@ val route :
             path_ok p /\ entry_in_bounds h0 ent blen (U32.v r) /\
             S.equal (entry_key h0 ent blob (U32.v r)) (key_of p)) /\
          (U32.v r = 4294967295 \/ U32.v r < U32.v count)) /\
-        U32.v (B.get h1 kl 0) <= 1040)
+        U32.v (B.get h1 kl 0) <= 1040 /\
+        (U32.v r < U32.v count ==>
+          S.slice (B.as_seq h1 key) 0 (U32.v (B.get h1 kl 0)) ==
+            key_of (target_path h0 req (U32.v toff) (U32.v tlen))))
 let route req toff tlen ent count blob blen key kl =
   let t = B.sub req toff tlen in
   let n = norm_key t tlen key in
@@ -990,13 +1051,36 @@ let frame_derived (h2 h3:HS.mem) (req:ibuf) (ent:B.buffer U32.t) (blob:ibuf) (bl
                    (forall (i:nat{i < B.length ent}). B.get h3 ent i == B.get h2 ent i))
   = ()
 
+private inline_for_extraction
+let body_to_send (meth length:U32.t) : r:U32.t{r == (if meth = 1ul then 0ul else length)} =
+  if meth = 1ul then 0ul else length
+
+private inline_for_extraction
+let status_for_error (st:U32.t) : r:U32.t{r == (if st = 3ul then 405ul else if st = 4ul then 431ul else 400ul)} =
+  if st = 3ul then 405ul else if st = 4ul then 431ul else 400ul
+
+(* Record common fields of a ready response. *)
+private inline_for_extraction
+let record_response (res:res10) (consumed hl boff bl close:U32.t)
+  : Stack unit
+    (requires fun h -> B.live h res)
+    (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer res) h0 h1 /\
+      B.get h1 res 0 == 1ul /\ B.get h1 res 1 == consumed /\ B.get h1 res 2 == hl /\
+      B.get h1 res 3 == boff /\ B.get h1 res 4 == bl /\ B.get h1 res 5 == close /\
+      (forall (i:nat{6 <= i /\ i < 10}). B.get h1 res i == B.get h0 res i)) =
+  B.upd res 0ul 1ul; B.upd res 1ul consumed; B.upd res 2ul hl;
+  B.upd res 3ul boff; B.upd res 4ul bl; B.upd res 5ul close
+
 (* Top-level entry called by the C shell.
    res[0]: 0 = need more input, 1 = response ready
    res[1]: bytes of request consumed        res[2]: header length in [out]
    res[3]: body offset in blob              res[4]: body length to send (0 for HEAD/errors)
    res[5]: 1 = close connection after response
-   res[6..9]: routing record, see [routed].  Proved: when res[8]=1 the body slice is exactly the
-   site entry whose key equals key_of(path_of(target)); when res[8]=2 no in-bounds entry has that key. *)
+   res[6..9]: routing record, see [routed].
+   [response] ties the consumed head, wire status and headers, and the
+   GET or HEAD body length to the request and selected entry. *)
+#push-options "--split_queries always"
+
 val handle_inner :
      req:ibuf -> n:U32.t{B.length req = U32.v n /\ U32.v n <= 8192}
   -> ent:B.buffer U32.t -> count:U32.t{B.length ent = 4 * U32.v count}
@@ -1015,7 +1099,8 @@ val handle_inner :
            U32.v (B.get h1 res 2) <= 512 /\
            U32.v (B.get h1 res 1) <= U32.v n /\
            U32.v (B.get h1 res 3) + U32.v (B.get h1 res 4) <= U32.v blen) /\
-        routed h1 req n ent count blob blen res)
+        routed h1 req n ent count blob blen res /\
+        response h1 req out ent res)
 let handle_inner req n ent count blob blen out res key klb =
   let r8 = B.sub res 0ul 8ul in
   let before_parse = get () in
@@ -1027,15 +1112,20 @@ let handle_inner req n ent count blob blen out res key klb =
   let tlen = B.index res 3ul in
   let consumed = B.index res 4ul in
   let closeq = B.index res 5ul in
+  assert (B.get after_parse r8 0 == st /\ B.get after_parse r8 4 == consumed);
   B.upd res 8ul 0ul; B.upd res 9ul 0ul; B.upd res 6ul 0ul; B.upd res 7ul 0ul;
   if st = 0ul then begin
-    B.upd res 0ul 0ul
+    B.upd res 0ul 0ul;
+    let h = get () in
+    reveal_opaque (`%response) (response h req out ent res)
   end else if st = 1ul then begin
     let hb = get () in
     assert (B.as_seq hb req == B.as_seq before_parse req);
-    assert (B.get after_parse r8 0 == 1ul /\ B.get after_parse r8 2 == toff /\
+    assert (B.get after_parse r8 0 == 1ul /\ B.get after_parse r8 1 == meth /\ B.get after_parse r8 2 == toff /\
             B.get after_parse r8 3 == tlen /\ B.get after_parse r8 4 == consumed /\
             B.get after_parse r8 5 == closeq);
+    assert (first_complete_head (B.as_seq hb req) (U32.v consumed));
+    assert (request_line (B.as_seq hb req) meth (U32.v toff) (U32.v tlen));
     assert (header_section (B.as_seq hb req) (U32.v toff + U32.v tlen + 9) (U32.v consumed) closeq);
     let found = route req toff tlen ent count blob blen key klb in
     let h2 = get () in
@@ -1044,37 +1134,79 @@ let handle_inner req n ent count blob blen out res key klb =
     let kl = B.index klb 0ul in
     if found = 4294967295ul then begin
       let k0 = B.sub key 0ul 0ul in
+      let before_header = get () in
+      S.lemma_eq_intro (B.as_seq before_header k0) S.empty;
+      S.lemma_eq_elim (B.as_seq before_header k0) S.empty;
       let hl = build_header out 404ul k0 0ul 0ul (closeq <> 0ul) in
-      B.upd res 0ul 1ul; B.upd res 1ul consumed; B.upd res 2ul hl;
-      B.upd res 3ul 0ul; B.upd res 4ul 0ul; B.upd res 5ul closeq;
+      let after_header = get () in
+      record_response res consumed hl 0ul 0ul closeq;
+      let after_common = get () in
       B.upd res 6ul toff; B.upd res 7ul tlen; B.upd res 8ul 2ul;
       let h3 = get () in
       frame_all h2 h3 req ent blob blen (B.loc_union (B.loc_buffer res) (B.loc_buffer out));
       assert (B.as_seq h3 req == B.as_seq hb req /\ B.get h3 res 1 == consumed /\
               B.get h3 res 5 == closeq /\ B.get h3 res 6 == toff /\ B.get h3 res 7 == tlen);
-      frame_derived h2 h3 req ent blob blen
+      frame_derived h2 h3 req ent blob blen;
+      B.modifies_buffer_elim out (B.loc_buffer res) after_header after_common;
+      B.modifies_buffer_elim out (B.loc_buffer res) after_common h3;
+      assert_spinoff (routed h3 req n ent count blob blen res);
+      assert_spinoff (routed_response h3 req out ent res meth);
+      certify_routed_response h3 req out ent res meth
     end else begin
       let b = U32.mul 4ul found in
       let boff = B.index ent (U32.add b 2ul) in
       let bl = B.index ent (U32.add b 3ul) in
       let k = B.sub key 0ul kl in
+      let before_header = get () in
+      assert (B.as_seq before_header k == key_of (target_path hb req (U32.v toff) (U32.v tlen)));
       let hl = build_header out 200ul k kl bl (closeq <> 0ul) in
-      B.upd res 0ul 1ul; B.upd res 1ul consumed; B.upd res 2ul hl;
-      B.upd res 3ul boff; B.upd res 4ul (if meth = 1ul then 0ul else bl); B.upd res 5ul closeq;
+      let after_header = get () in
+      record_response res consumed hl boff (body_to_send meth bl) closeq;
+      let after_common = get () in
       B.upd res 6ul toff; B.upd res 7ul tlen; B.upd res 8ul 1ul; B.upd res 9ul found;
       let h3 = get () in
       frame_all h2 h3 req ent blob blen (B.loc_union (B.loc_buffer res) (B.loc_buffer out));
       assert (B.as_seq h3 req == B.as_seq hb req /\ B.get h3 res 1 == consumed /\
               B.get h3 res 5 == closeq /\ B.get h3 res 6 == toff /\ B.get h3 res 7 == tlen);
-      frame_derived h2 h3 req ent blob blen
+      frame_derived h2 h3 req ent blob blen;
+      B.modifies_buffer_elim out (B.loc_buffer res) after_header after_common;
+      B.modifies_buffer_elim out (B.loc_buffer res) after_common h3;
+      assert_spinoff (routed h3 req n ent count blob blen res);
+      assert_spinoff (routed_response h3 req out ent res meth);
+      certify_routed_response h3 req out ent res meth
     end
   end else begin
-    let code = if st = 3ul then 405ul else if st = 4ul then 431ul else 400ul in
+    let code = status_for_error st in
     let k0 = B.sub key 0ul 0ul in
+    let before_header = get () in
+    S.lemma_eq_intro (B.as_seq before_header k0) S.empty;
+    S.lemma_eq_elim (B.as_seq before_header k0) S.empty;
     let hl = build_header out code k0 0ul 0ul true in
-    B.upd res 0ul 1ul; B.upd res 1ul consumed; B.upd res 2ul hl;
-    B.upd res 3ul 0ul; B.upd res 4ul 0ul; B.upd res 5ul 1ul
+    let after_header = get () in
+    record_response res consumed hl 0ul 0ul 1ul;
+    let h = get () in
+    B.modifies_buffer_elim out (B.loc_buffer res) after_header h;
+    assert_spinoff (error_response h req out res code);
+    certify_error_response h req out ent res code
   end
+
+#pop-options
+
+let frame_response (h0 h1:HS.mem) (req out:ibuf) (ent:B.buffer U32.t) (res:res10)
+  : Lemma
+    (requires B.as_seq h0 req == B.as_seq h1 req /\ B.as_seq h0 out == B.as_seq h1 out /\
+              B.as_seq h0 ent == B.as_seq h1 ent /\ B.as_seq h0 res == B.as_seq h1 res /\
+              B.live h0 res /\ B.live h1 res /\ B.live h0 ent /\ B.live h1 ent /\
+              response h0 req out ent res)
+    (ensures response h1 req out ent res) =
+  reveal_opaque (`%response) (response h0 req out ent res);
+  reveal_opaque (`%response) (response h1 req out ent res);
+  let route_frame (meth:U32.t) : Lemma
+    (routed_response h0 req out ent res meth ==> routed_response h1 req out ent res meth) = () in
+  let error_frame (st:U32.t) : Lemma
+    (error_response h0 req out res st ==> error_response h1 req out res st) = () in
+  FStar.Classical.forall_intro route_frame;
+  FStar.Classical.forall_intro error_frame
 
 val handle :
      req:ibuf -> n:U32.t{B.length req = U32.v n /\ U32.v n <= 8192}
@@ -1090,10 +1222,14 @@ val handle :
            U32.v (B.get h1 res 2) <= 512 /\
            U32.v (B.get h1 res 1) <= U32.v n /\
            U32.v (B.get h1 res 3) + U32.v (B.get h1 res 4) <= U32.v blen) /\
-        routed h1 req n ent count blob blen res)
+        routed h1 req n ent count blob blen res /\
+        response h1 req out ent res)
 let handle req n ent count blob blen out res =
   push_frame ();
   let key = B.alloca 0uy 1040ul in
   let klb = B.alloca 0ul 1ul in
   handle_inner req n ent count blob blen out res key klb;
-  pop_frame ()
+  let before_pop = get () in
+  pop_frame ();
+  let after_pop = get () in
+  frame_response before_pop after_pop req out ent res

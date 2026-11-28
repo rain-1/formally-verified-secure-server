@@ -10,6 +10,7 @@ module U16 = FStar.UInt16
 module HS = FStar.HyperStack
 module S = FStar.Seq
 module Spec = Tls.Spec
+open FStar.Mul
 
 #set-options "--z3rlimit 200 --fuel 1 --ifuel 1"
 
@@ -175,21 +176,32 @@ let put_lit_c out pos lit l =
   r
 
 (* big-endian reads; caller guarantees bounds *)
+noextract let read_be16 (s:S.seq U8.t) (pos:nat{pos + 2 <= S.length s}) : GTot nat =
+  U8.v (S.index s pos) * 256 + U8.v (S.index s (pos + 1))
+
+noextract let read_be24 (s:S.seq U8.t) (pos:nat{pos + 3 <= S.length s}) : GTot nat =
+  U8.v (S.index s pos) * 65536 + read_be16 s (pos + 1)
+
 val rd16 : b:ibuf -> pos:U32.t{U32.v pos + 2 <= B.length b}
   -> Stack U32.t (requires fun h -> B.live h b)
-     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536)
+     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 65536 /\
+       U32.v r == read_be16 (B.as_seq h0 b) (U32.v pos))
 let rd16 b pos =
   let x = B.index b pos in
   let y = B.index b (U32.add pos 1ul) in
+  assert_norm (pow2 8 = 256);
   U32.add (U32.shift_left (FStar.Int.Cast.uint8_to_uint32 x) 8ul) (FStar.Int.Cast.uint8_to_uint32 y)
 
 val rd24 : b:ibuf -> pos:U32.t{U32.v pos + 3 <= B.length b}
   -> Stack U32.t (requires fun h -> B.live h b)
-     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 16777216)
+     (ensures fun h0 r h1 -> h0 == h1 /\ U32.v r < 16777216 /\
+       U32.v r == read_be24 (B.as_seq h0 b) (U32.v pos))
 let rd24 b pos =
   let x = B.index b pos in
   let y = B.index b (U32.add pos 1ul) in
   let z = B.index b (U32.add pos 2ul) in
+  assert_norm (pow2 8 = 256);
+  assert_norm (pow2 16 = 65536);
   U32.add (U32.add (U32.shift_left (FStar.Int.Cast.uint8_to_uint32 x) 16ul)
                    (U32.shift_left (FStar.Int.Cast.uint8_to_uint32 y) 8ul))
           (FStar.Int.Cast.uint8_to_uint32 z)

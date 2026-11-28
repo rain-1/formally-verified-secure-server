@@ -44,6 +44,28 @@ check "raw suite: 400 no-host/two-hosts/CL:5/TE/obs-fold/NUL/space" \
 check "raw suite: 431 oversized header, pipelining answers 2"  'grep -q "header >8k *HTTP/1.1 431" test/raw.out && grep -q "2 pipelined.*\[2 resp\]" test/raw.out'
 check "raw suite: 100 headers accepted, 101 rejected" \
   'grep -q "100 header lines *HTTP/1.1 200" test/raw.out && grep -q "101 header lines *HTTP/1.1 400" test/raw.out'
+check "pipelined HEAD and GET have the same header and only GET sends a body" 'python3 - <<PY
+import socket
+from pathlib import Path
+
+with socket.create_connection(("127.0.0.1", 18080), timeout=3) as conn:
+    conn.sendall(b"HEAD / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                 b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                 b"GET /style.css HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    reply = bytearray()
+    while chunk := conn.recv(4096):
+        reply.extend(chunk)
+
+head, get, tail = reply.split(b"\r\n\r\n", 2)
+assert head == get
+assert head.startswith(b"HTTP/1.1 200 OK\r\n")
+body = Path("test/site/index.html").read_bytes()
+assert f"\r\nContent-Length: {len(body)}\r\n".encode() in head
+assert tail.startswith(body + b"HTTP/1.1 200 OK\r\n")
+last_header, last_body = tail[len(body):].split(b"\r\n\r\n", 1)
+assert b"\r\nConnection: close" in last_header
+assert last_body == Path("test/site/style.css").read_bytes()
+PY'
 echo "== TLS 1.3"
 check "openssl s_client + cert verify (ChaCha20)" \
   '(printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"; sleep 0.5) | openssl s_client -connect 127.0.0.1:18443 -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256 -CAfile test/tls/cert.pem -verify_return_error -quiet -servername localhost 2>&1 | grep -q "<h1>hello"'

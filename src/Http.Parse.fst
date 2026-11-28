@@ -2,7 +2,8 @@ module Http.Parse
 (* Verified Low-star HTTP/1.1 request parser (GET/HEAD subset).
    Proven: memory safety, and that an accepted request yields in-bounds
    offsets (target inside the header block, consumed <= input length).
-   Accepted requests satisfy the field grammar and body-framing policy. *)
+   Complete requests consume through the first CRLFCRLF. Accepted requests
+   satisfy the request-line grammar, field grammar, and body-framing policy. *)
 open FStar.HyperStack.ST
 module B = LowStar.Buffer
 module MB = LowStar.Monotonic.Buffer
@@ -120,6 +121,26 @@ noextract let header_section (s:S.seq U8.t) (e:nat) (consumed:nat{consumed <= S.
   e + 4 <= consumed /\ crlf_at s e /\ crlf_at s (consumed - 2) /\
   header_fields s (e + 2) (consumed - 2) 100 1 0ul close
 
+noextract let get_method : Lit.ascii_string =
+  assert_norm (Lit.is_ascii_string "GET ");
+  "GET "
+
+noextract let head_method : Lit.ascii_string =
+  assert_norm (Lit.is_ascii_string "HEAD ");
+  "HEAD "
+
+noextract let http_version : Lit.ascii_string =
+  assert_norm (Lit.is_ascii_string " HTTP/1.1");
+  " HTTP/1.1"
+
+noextract let request_line (s:S.seq U8.t) (meth:U32.t) (off len:nat) : prop =
+  1 <= len /\ len <= 2048 /\ off + len + 11 <= S.length s /\
+  ((meth == 0ul /\ off == 4 /\ literal_matches s 0 (Lit.u8s_of_ascii_string get_method) 0 false) \/
+   (meth == 1ul /\ off == 5 /\ literal_matches s 0 (Lit.u8s_of_ascii_string head_method) 0 false)) /\
+  (forall (i:nat{off <= i /\ i < off + len}). is_vis (S.index s i)) /\
+  literal_matches s (off + len) (Lit.u8s_of_ascii_string http_version) 0 false /\
+  crlf_at s (off + len + 9)
+
 (* first position in [i,hi) holding byte c, or hi *)
 val find_byte : b:ibuf -> hi:idx b -> i:idx b{U32.v i <= U32.v hi} -> c:U8.t
   -> Stack U32.t (requires fun h -> B.live h b)
@@ -143,12 +164,26 @@ let rec find_crlf b hi i =
     if c0 = 13uy && c1 = 10uy then i else find_crlf b hi (U32.add i 1ul)
   end
 
+noextract let head_terminator (s:S.seq U8.t) (p:nat) : prop =
+  p + 4 <= S.length s /\ crlf_at s p /\ crlf_at s (p + 2)
+
+noextract let no_terminator_before (s:S.seq U8.t) (lo hi stop:nat) : prop =
+  forall (p:nat{lo <= p /\ p < stop /\ p + 4 <= hi}). ~(head_terminator s p)
+
+noextract let no_complete_head (s:S.seq U8.t) : prop =
+  no_terminator_before s 0 (S.length s) (S.length s)
+
+noextract let first_complete_head (s:S.seq U8.t) (consumed:nat) : prop =
+  4 <= consumed /\ head_terminator s (consumed - 4) /\
+  no_terminator_before s 0 (S.length s) (consumed - 4)
+
 (* first position p of CRLFCRLF (p+4 <= hi), or hi *)
 val find_end : b:ibuf -> hi:idx b{U32.v hi <= 65536} -> i:idx b{U32.v i <= U32.v hi}
   -> Stack U32.t (requires fun h -> B.live h b)
      (ensures fun h0 r h1 -> h0 == h1 /\ U32.v i <= U32.v r /\ U32.v r <= U32.v hi /\
         (U32.v r < U32.v hi ==> U32.v r + 4 <= U32.v hi /\
-          crlf_at (B.as_seq h0 b) (U32.v r) /\ crlf_at (B.as_seq h0 b) (U32.v r + 2)))
+          head_terminator (B.as_seq h0 b) (U32.v r)) /\
+        no_terminator_before (B.as_seq h0 b) (U32.v i) (U32.v hi) (U32.v r))
      (decreases (U32.v hi - U32.v i))
 let rec find_end b hi i =
   if U32.lt (U32.sub hi i) 4ul then hi
@@ -169,7 +204,9 @@ let rec all_tchar b hi i =
 
 val all_vis : b:ibuf -> hi:idx b -> i:idx b{U32.v i <= U32.v hi}
   -> Stack bool (requires fun h -> B.live h b)
-     (ensures fun h0 _ h1 -> h0 == h1) (decreases (U32.v hi - U32.v i))
+     (ensures fun h0 ok h1 -> h0 == h1 /\
+       (ok <==> (forall (j:nat{U32.v i <= j /\ j < U32.v hi}). is_vis (S.index (B.as_seq h0 b) j))))
+     (decreases (U32.v hi - U32.v i))
 let rec all_vis b hi i =
   if i = hi then true else if is_vis (B.index b i) then all_vis b hi (U32.add i 1ul) else false
 
@@ -369,7 +406,14 @@ val parse : req:ibuf -> n:U32.t{B.length req = U32.v n /\ U32.v n <= 8192} -> re
   -> Stack unit
      (requires fun h -> B.live h req /\ B.live h res /\ B.disjoint req res)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_buffer res) h0 h1 /\ ok_result h1 res n /\
+       (let s = B.as_seq h0 req in
+        let status = B.get h1 res 0 in
+        let consumed = U32.v (B.get h1 res 4) in
+        if status = 0ul then U32.v n < 8192 /\ no_complete_head s
+        else if status = 4ul then consumed == 8192 /\ U32.v n == 8192 /\ no_complete_head s
+        else (status == 1ul \/ status == 2ul \/ status == 3ul) /\ first_complete_head s consumed) /\
        (B.get h1 res 0 == 1ul ==>
+         request_line (B.as_seq h0 req) (B.get h1 res 1) (U32.v (B.get h1 res 2)) (U32.v (B.get h1 res 3)) /\
          header_section (B.as_seq h0 req) (U32.v (B.get h1 res 2) + U32.v (B.get h1 res 3) + 9)
            (U32.v (B.get h1 res 4)) (B.get h1 res 5)))
 let parse req n res =
@@ -412,6 +456,7 @@ let parse req n res =
           let h = get () in
           reveal_opaque (`%header_section) (header_section (B.as_seq h req) (U32.v e) (U32.v consumed) (B.get h res 5));
           assert (header_section (B.as_seq h req) (U32.v e) (U32.v consumed) (B.get h res 5));
+          assert (request_line (B.as_seq h req) (if isget then 0ul else 1ul) (U32.v toff) (U32.v tlen));
           B.upd res 1ul (if isget then 0ul else 1ul);
           B.upd res 2ul toff; B.upd res 3ul tlen; B.upd res 4ul consumed;
           B.upd res 0ul 1ul
