@@ -8,7 +8,15 @@ E := $(CURDIR)/.toolchain/everparse/everparse
 FSTAR := $(E)/bin/fstar.exe
 KRML := $(E)/bin/krml
 CACHE := _build/cache
-FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fstar/specs --include third_party/hacl-fstar/lib --cache_checked_modules --cache_dir $(CACHE)
+FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fstar/specs --include third_party/hacl-fstar/lib --include third_party/hacl-fstar/vale --cache_checked_modules --cache_dir $(CACHE)
+# Verify the Vale specification sources and interfaces in dependency order.
+VALE_SOURCES := $(addprefix third_party/hacl-fstar/vale/,Vale.Def.Opaque_s.fsti Vale.Def.Opaque_s.fst \
+  Vale.Def.Prop_s.fst Vale.Lib.Seqs_s.fst Vale.Def.Words_s.fsti Vale.Def.Words_s.fst \
+  Vale.Def.Words.Two_s.fsti Vale.Def.Words.Two_s.fst Vale.Def.Words.Four_s.fsti Vale.Def.Words.Four_s.fst \
+  Vale.Def.Words.Seq_s.fsti Vale.Def.Words.Seq_s.fst Vale.Def.Types_s.fst Vale.Math.Poly2.Defs_s.fst \
+  Vale.Math.Poly2_s.fsti Vale.Math.Poly2_s.fst Vale.Math.Poly2.Bits_s.fsti Vale.Math.Poly2.Bits_s.fst \
+  Vale.AES.GF128_s.fsti Vale.AES.GF128_s.fst Vale.AES.AES_common_s.fst Vale.AES.AES_s.fst \
+  Vale.AES.GCTR_s.fst Vale.AES.GHash_s.fst Vale.AES.GCM_s.fst)
 # dependency order
 MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
@@ -43,8 +51,8 @@ export PATH := $(E)/bin:$(PATH)
 .PHONY: verify c native server server-static test-matrix fuzz timing ct-trace clean
 verify:
 	@mkdir -p $(CACHE)
-	@for source in $(FST_SOURCES); do \
-	  printf '%-36s' "$$source"; \
+	@for source in $(VALE_SOURCES) src/Tls.AesGcm.fsti src/Tls.AesGcm.fst $(FST_SOURCES); do \
+	  printf '%-68s' "$$source"; \
 	  if out=$$($(FSTAR) $(FSTFLAGS) "$$source" 2>&1); then echo ok; \
 	  else echo FAILED; printf '%s\n' "$$out"; exit 1; fi; \
 	done

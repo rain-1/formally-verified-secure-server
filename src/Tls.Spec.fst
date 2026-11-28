@@ -3,6 +3,7 @@ module Tls.Spec
    The binding modules assume that HACL* C implements the vendored Spec.Agile specifications. *)
 module S = FStar.Seq
 module U8 = FStar.UInt8
+module AG = Tls.AesGcm
 
 type bytes = S.seq U8.t
 
@@ -250,7 +251,7 @@ let record_nonce (iv:bytes{S.length iv = 12}) (seq:bytes{S.length seq = 8}) : r:
   S.init 12 (fun i -> U8.uint_to_t (nonce_byte iv seq i))
 
 (* RFC 8446 section 5.2, with zero sender-supplied padding. ChaCha20 uses
-   HACL*'s specification. The AES-GCM operations are abstract. *)
+   HACL*'s specification. AES-GCM uses the pinned Vale specification. *)
 type record_alg = | Aes128Gcm | ChaCha20Poly1305
 
 let record_alg_for (suite:U8.t) : record_alg =
@@ -265,17 +266,12 @@ let record_key (suite:U8.t) (key:bytes{S.length key = 32})
 let record_header (body_len:nat{body_len < 65536}) : h:bytes{S.length h = 5} =
   S.append (S.append (S.create 1 23uy) (u16_be 771)) (u16_be body_len)
 
-assume val aes128gcm_encrypt : bytes -> bytes -> bytes -> p:bytes ->
-  c:bytes{S.length c = S.length p + 16}
-assume val aes128gcm_decrypt : bytes -> bytes -> bytes -> c:bytes{S.length c >= 16} ->
-  option (p:bytes{S.length p = S.length c - 16})
-
 [@@"opaque_to_smt"]
 noextract let record_encrypt (alg:record_alg) (key:bytes{S.length key = record_key_len alg})
     (nonce:bytes{S.length nonce = 12}) (aad:bytes{S.length aad = 5})
     (plain:bytes{S.length plain <= 16640}) : c:bytes{S.length c = S.length plain + 16} =
   match alg with
-  | Aes128Gcm -> aes128gcm_encrypt key nonce aad plain
+  | Aes128Gcm -> AG.encrypt key nonce aad plain
   | ChaCha20Poly1305 ->
     assert_norm (LI.max_size_t > 16640 /\ LI.maxint LI.U64 > 5);
     unlift (Spec.Chacha20Poly1305.aead_encrypt (lift key) (lift nonce) (lift plain) (lift aad))
@@ -286,7 +282,7 @@ noextract let record_decrypt (alg:record_alg) (key:bytes{S.length key = record_k
     (c:bytes{16 <= S.length c /\ S.length c <= 16640}) :
   option (p:bytes{S.length p = S.length c - 16})
   = match alg with
-    | Aes128Gcm -> aes128gcm_decrypt key nonce aad c
+    | Aes128Gcm -> AG.decrypt key nonce aad c
     | ChaCha20Poly1305 ->
       assert_norm (LI.max_size_t > 16640 /\ LI.maxint LI.U64 > 5);
       let pos = S.length c - 16 in

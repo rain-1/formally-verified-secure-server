@@ -1,7 +1,11 @@
 module EverCrypt.AEAD
 (* TRUSTED INTERFACE: binding to EverCrypt_AEAD_{en,de}crypt_expand_aes128_gcm (HACL*/Vale, x86-64 AES-NI).
+   The record model specializes the same Vale GCM definitions used by the pinned
+   x86-64 wrappers. This boundary assumes that the linked C and assembly obey
+   the memory, status and byte-level contracts below.
    One-shot: expands the key on every call, so no heap state is needed.
-   Return value: 0 = success, 3 = authentication failure, others = unsupported/invalid. *)
+   For the verified inputs, 0 means success, 1 means the backend is unavailable,
+   and 3 means authentication failure. *)
 open FStar.HyperStack.ST
 module B = LowStar.Buffer
 module U32 = FStar.UInt32
