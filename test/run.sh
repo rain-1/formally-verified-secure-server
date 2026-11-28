@@ -67,6 +67,8 @@ assert b"\r\nConnection: close" in last_header
 assert last_body == Path("test/site/style.css").read_bytes()
 PY'
 echo "== TLS 1.3"
+check "TLS startup requires the first certificate to match the signing key" \
+  'python3 test/tls_credentials.py "$BIN"'
 check "openssl s_client + cert verify (ChaCha20)" \
   '(printf "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"; sleep 0.5) | openssl s_client -connect 127.0.0.1:18443 -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256 -CAfile test/tls/cert.pem -verify_return_error -quiet -servername localhost 2>&1 | grep -q "<h1>hello"'
 check "openssl s_client + cert verify (AES-128-GCM)" \

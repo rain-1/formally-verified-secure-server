@@ -42,6 +42,7 @@ extern "C" {
     );
     fn Tls_Conn_seal_app(state: *mut u8, plain: *const u8, len: u32, out: *mut u8) -> u32;
     fn Tls_Conn_close_notify(state: *mut u8, out: *mut u8) -> u32;
+    fn Tls_Credentials_matches(key: *const u8, point: *const u8, len: u32) -> bool;
     fn EverCrypt_AutoConfig2_init();
     fn EverCrypt_AutoConfig2_has_aesni() -> bool;
     fn EverCrypt_AutoConfig2_has_pclmulqdq() -> bool;
@@ -139,6 +140,20 @@ impl Credentials {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid TLS chain size",
+            ));
+        }
+        let point = crate::credential::leaf_p256_point(&chain).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TLS leaf must contain a named-curve P-256 public key",
+            )
+        })?;
+        // The scalar and leaf point are live in separate allocations. The core
+        // reads 32 key bytes and exactly point.len() point bytes, preserving both.
+        if !unsafe { Tls_Credentials_matches(key.0.as_ptr(), point.as_ptr(), point.len() as u32) } {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TLS key is invalid or does not match the leaf certificate",
             ));
         }
         static AES_OK: OnceLock<bool> = OnceLock::new();

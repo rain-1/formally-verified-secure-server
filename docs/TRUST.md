@@ -19,7 +19,8 @@ A proof is a statement about a model. These are the things the guarantees depend
 
 **Unverified code**
 - The Rust shell uses owned file descriptors, checked indexing, and typed buffers. The hand-written C ABI in `shell/src/core.rs` must uphold the Low* contracts. The site loader, Linux syscall wrappers, and sandbox policy remain trusted. The socket suite exercises the combined binary, and ASan/UBSan instrument the C core in the sanitizer build.
-- Offline tool `tools/prepare-cert.py` (runs at deploy time, not in the server).
+- The startup DER traversal identifies the first CertificateEntry's named-curve P-256 SPKI. `Credentials` passes the same chain and key to the TLS core after the Low* key match. The DER traversal and the Rust credential ownership path are review and test evidence. Certificate signatures, issuers, validity periods, names, and key custody remain part of deployment and peer validation. [Leaf extraction](../shell/src/credential.rs) · [Credential ownership](../shell/src/core.rs) · [Key-check contract](../src/Tls.Credentials.fst)
+- The offline conversion tool `tools/prepare-cert.py` runs at deploy time. The server checks the resulting leaf and scalar at startup.
 
 **Environment**
 - Linux kernel, glibc, hardware, `pf`, `sshd`, certificate issuance/renewal (ACME is out of scope; restart the server to reload certs).

@@ -1,4 +1,5 @@
 mod core;
+mod credential;
 mod linux;
 mod sandbox;
 mod site;

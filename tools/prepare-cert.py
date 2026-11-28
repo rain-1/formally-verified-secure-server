@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Offline helper (NOT part of the server's trusted runtime): convert PEM files into the two
-binary files the server loads, so the server itself never parses ASN.1 / PEM.
+"""Offline helper to convert PEM inputs into the two binary files the server loads.
+The server checks that the first DER certificate's P-256 public key matches the scalar.
 
   prepare-cert.py fullchain.pem privkey.pem OUTDIR
     -> OUTDIR/chain.bin : TLS CertificateEntry list: for each cert  u24 len | DER | u16 0

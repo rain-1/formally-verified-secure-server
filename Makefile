@@ -12,7 +12,7 @@ FSTFLAGS := --include $(E)/lib/krml --include src --include third_party/hacl-fst
 # dependency order
 MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
-        Tls.Util Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
+        Tls.Util Tls.Credentials Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 FST_SOURCES := $(addprefix src/,$(addsuffix .fst,$(MODS)))
 CC ?= gcc
 OBJDUMP ?= objdump
@@ -35,7 +35,7 @@ HACL_SRC := $(addprefix csrc/hacl/,Hacl_AEAD_Chacha20Poly1305.c Hacl_Bignum256.c
   Hacl_MAC_Poly1305.c Hacl_P256.c Lib_Memzero0.c Hacl_Hash_SHA3.c Hacl_Hash_Blake2b.c Hacl_Hash_Blake2s.c \
   EverCrypt_AEAD.c EverCrypt_AutoConfig2.c EverCrypt_Chacha20Poly1305.c EverCrypt_Poly1305.c Vale.c) \
   csrc/hacl/aesgcm-x86_64-linux.S csrc/hacl/cpuid-x86_64-linux.S csrc/hacl/poly1305-x86_64-linux.S
-CORE_SRC := _build/c/Http_Server.c _build/c/Tls_Conn.c csrc/everparse/ClientHello.c csrc/everparse/ch_check.c $(HACL_SRC)
+CORE_SRC := _build/c/Http_Server.c _build/c/Tls_Credentials.c _build/c/Tls_Conn.c csrc/everparse/ClientHello.c csrc/everparse/ch_check.c $(HACL_SRC)
 CORE_INCLUDE_DIRS := _build/c csrc/hacl csrc/krml csrc/everparse
 RUST_LINK := $(RUST_LIBS) $(addprefix -C link-arg=,$(LDFLAGS))
 export PATH := $(E)/bin:$(PATH)
@@ -54,12 +54,12 @@ c:
 	$(KRML) -fstar tools/fstar-krml.sh -I src -tmpdir _build/c \
 	  -bundle 'Http.Server=Http.Server,Http.Parse,Http.Core,Http.Spec' \
 	  -bundle 'Tls.Conn=Tls.Conn,Tls.Server,Tls.Flight,Tls.Kdf,Tls.State,Tls.Crypto,Tls.Hello,Tls.Util' \
-	  -bundle Tls.ChValid -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
+	  -bundle 'Tls.Credentials=Tls.Credentials' -bundle Tls.ChValid -bundle Hacl.Hash.SHA2 -bundle Hacl.HMAC -bundle Hacl.HKDF -bundle Hacl.Curve25519_51 \
 	  -bundle Hacl.AEAD_Chacha20Poly1305 -bundle Hacl.P256 -bundle EverCrypt.AEAD -skip-compilation -warn-error -1..27 \
 	  $(FST_SOURCES) > _build/krml.log 2>&1 || { cat _build/krml.log; exit 1; }
-	test -f _build/c/Http_Server.c && test -f _build/c/Tls_Conn.c
+	test -f _build/c/Http_Server.c && test -f _build/c/Tls_Credentials.c && test -f _build/c/Tls_Conn.c
 	@# warnings are fatal only for OUR code (ghost HACL* spec modules trigger benign ones before being dropped)
-	@! grep -E '^Warning [0-9]+: .*(Tls\.(Util|Crypto|Hello|State|Kdf|Flight|Server|Conn)|Http\.(Core|Parse|Server)|Hacl\.(Hash|HMAC|HKDF|Curve|AEAD|P256)|EverCrypt)' _build/krml.log
+	@! grep -E '^Warning [0-9]+: .*(Tls\.(Util|Credentials|Crypto|Hello|State|Kdf|Flight|Server|Conn)|Http\.(Core|Parse|Server)|Hacl\.(Hash|HMAC|HKDF|Curve|AEAD|P256)|EverCrypt)' _build/krml.log
 	@# HACL* is linked from the vendored upstream C: replace krml's generated stub headers with forwarders
 	rm -f _build/c/internal/Hacl_*.h; mkdir -p _build/c/internal
 	@for h in Hacl_P256 Hacl_Hash_SHA2 Hacl_HMAC Hacl_HKDF Hacl_Curve25519_51 Hacl_AEAD_Chacha20Poly1305; do echo "#include <$$h.h>" > _build/c/internal/$$h.h; done
