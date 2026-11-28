@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PROGRESS = re.compile(r"\b(\d{1,3})%\**\s+\((\d+/\d+) (?:milestones|modules|tests)\)")
+PROGRESS = re.compile(r"\b\d{1,3}(?:\.\d+)?%\**\s+\((\d+)/(\d+) (?:milestones|modules|tests)\)")
 STATUS_STYLES = {
     "🔴": ("Started", "#b32635", "o"),
     "🟠": ("In progress", "#b54b0b", "o"),
@@ -34,11 +34,11 @@ def score(label, status):
     match = PROGRESS.search(status)
     if match is None:
         return None
-    percentage, fraction = match.groups()
+    completed, total = match.groups()
     symbol = status.strip()[0]
     if symbol not in STATUS_STYLES:
         raise ValueError(f"Unrecognized progress status for {label}: {status.strip()}")
-    return int(percentage), fraction, symbol
+    return 100 * int(completed) / int(total), f"{completed}/{total}", symbol
 
 
 def progress(readme):
@@ -78,6 +78,9 @@ def history(*, committed_only=False):
     carried = {}
     snapshots = []
     for commit in git("rev-list", "--reverse", "--first-parent", "HEAD").splitlines():
+        changed = git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", commit).splitlines()
+        if changed == ["docs/progress.png"]:
+            continue
         if "README.md" in git("ls-tree", "--name-only", commit, "--", "README.md").splitlines():
             rows = progress(git("show", f"{commit}:README.md"))
         else:
@@ -110,7 +113,7 @@ def draw(snapshots, output):
     revisions, rows = zip(("0% baseline", baseline), *snapshots)
 
     figure, axis = plt.subplots(figsize=(11.3, 5.9), facecolor=PAPER)
-    figure.subplots_adjust(left=0.085, right=0.695, bottom=0.20, top=0.73)
+    figure.subplots_adjust(left=0.085, right=0.680, bottom=0.20, top=0.73)
     figure.text(0.04, 0.92, "Formalization progress", fontsize=25, weight="bold", color=INK)
     commit_count = len(snapshots) - (snapshots[-1][0] == "Working tree")
     figure.text(0.04, 0.86, f"Recorded milestone percentages across {commit_count} mainline commits",
@@ -155,8 +158,9 @@ def draw(snapshots, output):
         minimum = 7 * (len(ordered) - i - 1)
         label_y = max(minimum, min(percent, label_y - 7))
         _, color, _ = STATUS_STYLES[status]
+        display_percent = f"{percent:.1f}".removesuffix(".0")
         axis.annotate(
-            f"{label} · {percent}% ({fraction})", xy=(last, percent), xytext=(1.05, label_y),
+            f"{label} · {display_percent}% ({fraction})", xy=(last, percent), xytext=(1.05, label_y),
             textcoords=axis.get_yaxis_transform(), va="center", color=color, fontsize=10,
             arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65, "relpos": (0, 0.5)},
         )

@@ -22,6 +22,7 @@ MODS := Tls.Spec Http.Spec Http.Core Http.Parse Http.Server \
         Hacl.Hash.SHA2 Hacl.HMAC Hacl.HKDF Hacl.Curve25519_51 Hacl.AEAD_Chacha20Poly1305 Hacl.P256 EverCrypt.AEAD \
         Tls.Util Tls.Credentials Tls.Crypto Tls.ChValid Tls.Hello Tls.State Tls.Kdf Tls.Flight Tls.Server Tls.Conn
 FST_SOURCES := $(addprefix src/,$(addsuffix .fst,$(MODS)))
+FST_PROOFS := src/Tls.Trace.fst
 CC ?= gcc
 OBJDUMP ?= objdump
 VALGRIND ?= valgrind
@@ -51,7 +52,7 @@ export PATH := $(E)/bin:$(PATH)
 .PHONY: verify c native server server-static test-matrix fuzz timing ct-trace clean
 verify:
 	@mkdir -p $(CACHE)
-	@for source in $(VALE_SOURCES) src/Tls.AesGcm.fsti src/Tls.AesGcm.fst $(FST_SOURCES); do \
+	@for source in $(VALE_SOURCES) src/Tls.AesGcm.fsti src/Tls.AesGcm.fst $(FST_SOURCES) $(FST_PROOFS); do \
 	  printf '%-68s' "$$source"; \
 	  if out=$$($(FSTAR) $(FSTFLAGS) "$$source" 2>&1); then echo ok; \
 	  else echo FAILED; printf '%s\n' "$$out"; exit 1; fi; \

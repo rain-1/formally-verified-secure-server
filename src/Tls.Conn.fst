@@ -286,13 +286,13 @@ let run_ch st tr chain clen pkey rnd inp rlen out res =
   end
 #pop-options
 
-noextract let client_hello_record_ready (h:HS.mem) (st:stb) (inp:Spec.bytes) (rtype:U8.t)
+noextract let client_hello_record_ready (aes:bool) (inp:Spec.bytes) (rtype:U8.t)
     (rlen:nat{5 + rlen <= S.length inp})
     (chain:Spec.bytes{S.length chain <= 12000}) (key:Spec.bytes{S.length key = 32})
     (rnd:Spec.bytes{S.length rnd = 96}) : prop =
   rtype == 22uy /\ 4 <= rlen /\ rlen <= 4100 /\
   S.index inp 5 == 1uy /\ read_be24 inp 6 == rlen - 4 /\
-  server_flight_ready (S.slice inp 5 (5 + rlen)) (B.get h st (U32.v o_aesok) = 1uy) chain key rnd
+  server_flight_ready (S.slice inp 5 (5 + rlen)) aes chain key rnd
 
 val phase0 : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
@@ -303,7 +303,7 @@ val phase0 : st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length 
      (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
                                 (B.loc_union (B.loc_buffer out) (B.loc_buffer res))) h0 h1 /\
         result_bounds (B.as_seq h1 res) (5 + U32.v rlen) 0 /\
-        (client_hello_record_ready h0 st (B.as_seq h0 inp) rtype (U32.v rlen)
+        (client_hello_record_ready (B.get h0 st (U32.v o_aesok) = 1uy) (B.as_seq h0 inp) rtype (U32.v rlen)
           (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd) ==> S.index (B.as_seq h1 res) 3 == 0ul) /\
         (S.index (B.as_seq h1 res) 3 == 0ul ==>
           rtype == 22uy /\ U32.v rlen >= 4 /\ S.index (B.as_seq h0 inp) 5 == 1uy /\
@@ -351,6 +351,8 @@ private let unique_inner_type (plain:Spec.bytes) (a b:nat) (ta tb:U8.t)
 noextract let client_finished_result (before after:state_bytes) (result:S.seq U32.t{S.length result = 4})
     (consumed:nat) : prop =
   S.index after (U32.v o_phase) == 2uy /\
+  S.index after (U32.v o_suite) == S.index before (U32.v o_suite) /\
+  S.slice after 188 240 == S.slice before 188 240 /\
   U32.v (S.index result 0) == consumed /\ S.index result 1 == 0ul /\
   S.index result 2 == 0ul /\ S.index result 3 == 0ul /\
   keys_installed after (U32.v o_ckey) (U32.v o_civ) (U32.v o_cseq)
@@ -397,6 +399,8 @@ let check_cfin st inner out res consumed =
     assert (phase_at connected st == 2uy);
     preserve_installed_keys (B.as_seq installed st) (B.as_seq connected st) 0 1 136 168 180
       (B.get h0 st 245) (state_slice h0 st 248 32);
+    preserved_state_slice (B.as_seq h0 st) (B.as_seq installed st) 136 188 188 240;
+    preserved_state_slice (B.as_seq installed st) (B.as_seq connected st) 0 1 188 240;
     set_res res consumed 0ul 0ul 0ul
   end else fatal st 51uy out res consumed
 #pop-options
@@ -469,6 +473,7 @@ let phase1 st inp rtype rlen out res =
           preserved_state_slice (B.as_seq h0 st) (B.as_seq opened st) 180 188 8 40;
           preserved_state_slice (B.as_seq h0 st) (B.as_seq opened st) 180 188 104 136;
           preserved_state_slice (B.as_seq h0 st) (B.as_seq opened st) 180 188 248 280;
+          preserved_state_slice (B.as_seq h0 st) (B.as_seq opened st) 180 188 188 240;
           assert (B.get opened st 245 == B.get h0 st 245);
           check_cfin st inner out res consumed;
           let checked = get () in
@@ -575,13 +580,27 @@ noextract let incomplete_record (wire:Spec.bytes) : prop =
   (S.length wire >= 5 /\ (let rlen = read_be16 wire 3 in
     rlen <= 16640 /\ S.length wire < 5 + rlen))
 
+noextract let input_buffers (h:HS.mem) (st:stb) (tr:trb) (chain pkey rnd inp out app:ibuf) (res:resb) : prop =
+  B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\
+  B.live h rnd /\ B.live h inp /\ B.live h out /\ B.live h app /\
+  B.live h res /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\
+  B.disjoint st rnd /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st app /\
+  B.disjoint st res /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\
+  B.disjoint tr inp /\ B.disjoint tr out /\ B.disjoint tr app /\ B.disjoint tr res /\
+  B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain inp /\ B.disjoint chain out /\
+  B.disjoint chain app /\ B.disjoint chain res /\ B.disjoint pkey rnd /\ B.disjoint pkey inp /\
+  B.disjoint pkey out /\ B.disjoint pkey app /\ B.disjoint pkey res /\ B.disjoint rnd inp /\
+  B.disjoint rnd out /\ B.disjoint rnd app /\ B.disjoint rnd res /\ B.disjoint inp out /\
+  B.disjoint inp app /\ B.disjoint inp res /\ B.disjoint out app /\ B.disjoint out res /\
+  B.disjoint app res
+
 val input :
      st:stb -> tr:trb -> chain:ibuf -> clen:U32.t{U32.v clen = B.length chain /\ U32.v clen <= 12000}
   -> pkey:ibuf{B.length pkey = 32} -> rnd:ibuf{B.length rnd = 96}
   -> inp:ibuf -> inlen:U32.t{U32.v inlen = B.length inp}
   -> out:ibuf{B.length out = 20480} -> app:ibuf -> appcap:U32.t{U32.v appcap = B.length app} -> res:resb
   -> Stack unit
-     (requires fun h -> B.live h st /\ B.live h tr /\ B.live h chain /\ B.live h pkey /\ B.live h rnd /\ B.live h inp /\ B.live h out /\ B.live h app /\ B.live h res /\ B.disjoint st tr /\ B.disjoint st chain /\ B.disjoint st pkey /\ B.disjoint st rnd /\ B.disjoint st inp /\ B.disjoint st out /\ B.disjoint st app /\ B.disjoint st res /\ B.disjoint tr chain /\ B.disjoint tr pkey /\ B.disjoint tr rnd /\ B.disjoint tr inp /\ B.disjoint tr out /\ B.disjoint tr app /\ B.disjoint tr res /\ B.disjoint chain pkey /\ B.disjoint chain rnd /\ B.disjoint chain inp /\ B.disjoint chain out /\ B.disjoint chain app /\ B.disjoint chain res /\ B.disjoint pkey rnd /\ B.disjoint pkey inp /\ B.disjoint pkey out /\ B.disjoint pkey app /\ B.disjoint pkey res /\ B.disjoint rnd inp /\ B.disjoint rnd out /\ B.disjoint rnd app /\ B.disjoint rnd res /\ B.disjoint inp out /\ B.disjoint inp app /\ B.disjoint inp res /\ B.disjoint out app /\ B.disjoint out res /\ B.disjoint app res)
+     (requires fun h -> input_buffers h st tr chain pkey rnd inp out app res)
      (ensures fun h0 _ h1 -> B.modifies (B.loc_union (B.loc_union (B.loc_buffer st) (B.loc_buffer tr))
                                (B.loc_union (B.loc_union (B.loc_buffer app) (B.loc_buffer out)) (B.loc_buffer res))) h0 h1 /\
         result_bounds (B.as_seq h1 res) (U32.v inlen) (U32.v appcap) /\
@@ -601,9 +620,10 @@ val input :
           (let wire = B.as_seq h0 inp in
            let rlen = read_be16 wire 3 in
            rlen <= 16640 /\ 5 + rlen <= U32.v inlen /\
-           client_hello_record_ready h0 st wire (S.index wire 0) rlen
+           client_hello_record_ready (B.get h0 st (U32.v o_aesok) = 1uy) wire (S.index wire 0) rlen
              (B.as_seq h0 chain) (B.as_seq h0 pkey) (B.as_seq h0 rnd))) ==>
-          phase_at h1 st == 1uy /\ S.index (B.as_seq h1 res) 3 == 0ul) /\
+          (let rlen = read_be16 (B.as_seq h0 inp) 3 in
+           reported_server_flight h0 h1 st tr chain pkey rnd inp out res rlen)) /\
         (phase_at h0 st <> 2uy ==>
            S.index (B.as_seq h1 res) 2 == 0ul) /\
         (phase_at h0 st == 2uy ==>
@@ -612,7 +632,8 @@ val input :
           (let rlen = read_be16 (B.as_seq h0 inp) 3 in
            rlen <= 16640 /\ 5 + rlen <= U32.v inlen /\
            client_finished_ready h0 st (B.as_seq h0 inp) rlen)) ==>
-          phase_at h1 st == 2uy) /\
+          (let rlen = read_be16 (B.as_seq h0 inp) 3 in
+           client_finished_result (B.as_seq h0 st) (B.as_seq h1 st) (B.as_seq h1 res) (5 + rlen))) /\
         (phase_at h0 st == 1uy /\ phase_at h1 st <> 1uy ==>
            U32.v inlen >= 5 /\ S.index (B.as_seq h0 inp) 0 == 23uy /\
            (let rlen = read_be16 (B.as_seq h0 inp) 3 in
