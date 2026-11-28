@@ -150,13 +150,13 @@ def draw(snapshots, output):
     last = len(revisions) - 1
     ordered = sorted(latest.items(), key=lambda item: item[1][0], reverse=True)
     label_y = 107
-    for i, (label, (percent, _, status)) in enumerate(ordered):
+    for i, (label, (percent, fraction, status)) in enumerate(ordered):
         # Keep labels readable when several traces end at the same percentage.
         minimum = 7 * (len(ordered) - i - 1)
         label_y = max(minimum, min(percent, label_y - 7))
         _, color, _ = STATUS_STYLES[status]
         axis.annotate(
-            f"{label} · {percent}%", xy=(last, percent), xytext=(1.05, label_y),
+            f"{label} · {percent}% ({fraction})", xy=(last, percent), xytext=(1.05, label_y),
             textcoords=axis.get_yaxis_transform(), va="center", color=color, fontsize=10,
             arrowprops={"arrowstyle": "-", "color": color, "linewidth": 1, "alpha": 0.65, "relpos": (0, 0.5)},
         )
